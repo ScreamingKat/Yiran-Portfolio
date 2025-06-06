@@ -1,2031 +1,321 @@
-{
-  "nbformat": 4,
-  "nbformat_minor": 0,
-  "metadata": {
-    "colab": {
-      "provenance": []
-    },
-    "kernelspec": {
-      "name": "python3",
-      "display_name": "Python 3"
-    },
-    "language_info": {
-      "name": "python"
+#pragma once
+
+#include <stdint.h>
+
+#include "Vec3f.hpp"//our standard vector type
+
+/*!
+ * This defines some types we use for the main loop.
+ */
+struct MainLoopInput {
+  float currentTime;  //[s]
+
+  struct {
+    float value;  //[V]
+    bool updated;
+  } batteryVoltage;
+
+  struct {
+    Vec3f accelerometer;  //[m/s**2]
+    Vec3f rateGyro;  //[rad/s]
+    bool updated;
+  } imuMeasurement;
+
+  struct {
+    float axisLeftVertical;  //no units
+    float axisLeftHorizontal;  //no units
+    float axisRightVertical;  //no units
+    float axisRightHorizontal;  //no units
+    bool buttonRed;
+    bool buttonGreen;
+    bool buttonBlue;
+    bool buttonYellow;
+    bool buttonStart;
+    bool buttonSelect;
+    bool updated;
+  } joystickInput;
+
+  struct {
+    float value_x; //[rad/s]
+    float value_y; //[rad/s]
+    bool updated;
+  } opticalFlowSensor;
+
+  struct {
+    float value;  //[m]
+    bool updated;
+  } heightSensor;
+
+  struct {
+    //You probably don't need to access these, but we're providing them
+    float imu_temperature; //[deg C] (provided for debugging purposes)
+    //Magnetometer info
+    //Barometer info
+  } extra;
+
+};
+
+struct MainLoopOutput {
+  int motorCommand1;  // located at body +x +y
+  int motorCommand2;  // located at body +x -y
+  int motorCommand3;  // located at body -x -y
+  int motorCommand4;  // located at body -x +y
+
+  //variables that are only used for telemetry:
+  float telemetryOutputs_plusMinus100[12];  // NOTE! These are bounded to be in +/- 100
+};
+
+#include "UtilityFunctions.hpp"
+
+int pwmCommandFromSpeed(float desiredSpeed_rad_per_sec) {
+  // Replace these two coefficients with what you get
+  // in the experiment. Note the trailing "f" after the
+  // number -- this ensures that we use single precision
+  // floating point (rather than double precision, which
+  // would be substantially slower on the microcontroller).
+  float a = -82.44f;  // the zeroth order term
+  float b = 0.1336f;  // the first order term
+
+  return int((desiredSpeed_rad_per_sec*b + a));
+}
+
+float speedFromForce(float desiredForce_N) {
+  // replace this with your determined constant:
+  // Remember to add the trailing "f" for single
+  // precision!
+  //From lab 2, our prop constance of 2*10-8
+  float const propConstant = 2.0e-08f;
+
+  //we implement a safety check,
+  //  (no sqrtf for negative numbers)
+  if (desiredForce_N <= 0) {
+    return 0.0f;
+  }
+
+  return sqrtf(desiredForce_N / propConstant);
+}
+
+#include "UserCode.hpp"
+#include "UtilityFunctions.hpp"
+#include "Vec3f.hpp"
+
+#include <stdio.h> //for printf
+#include <cmath>
+
+//An example of a variable that persists beyond the function call.
+float exampleVariable_float = 0.0f;  //Note the trailing 'f' in the number. This is to force single precision floating point.
+Vec3f exampleVariable_Vec3f = Vec3f(0, 0, 0);
+int exampleVariable_int = 0;
+
+//We keep the last inputs and outputs around for debugging:
+MainLoopInput lastMainLoopInputs;
+MainLoopOutput lastMainLoopOutputs;
+
+//Some constants that we may use:
+const float mass = 30e-3f;  // mass of the quadcopter [kg]
+const float gravity = 9.81f;  // acceleration of gravity [m/s^2]
+const float inertia_xx = 16e-6f;  //MMOI about x axis [kg.m^2]
+const float inertia_yy = inertia_xx;  //MMOI about y axis [kg.m^2]
+const float inertia_zz = 29e-6f;  //MMOI about z axis [kg.m^2]
+
+const float dt = 1.0f / 500.0f; //[s] period between successive calls to MainLoop
+
+
+//∗Outside∗ the main function:
+float estRoll = 0.0f;
+float estPitch = 0.0f;
+float estYaw= 0.0f;
+float rho = 0.01f;
+float pitch_mean;
+float roll_mean;
+float pitch_corrected = 0.0f;
+float roll_corrected = 0.0f;
+
+//*Before* MainLoop
+Vec3f estGyroBias = Vec3f(0.0f, 0.0f, 0.0f);
+
+//lab 4
+//defining input for lab experiment
+//float desNormalizedAcceleration = 8.0f;
+//Vec3f ang_acc = Vec3f(0.0f,0.0f,0.0f);
+Vec3f ang_vel = Vec3f(0.0f,0.0f,0.0f);
+Vec3f ang_angle = Vec3f(0.0f,0.0f,0.0f);
+float n1;
+float n2;
+float n3;
+float cp1;
+float cp2;
+float cp3;
+float cp4;
+float l_b = 33.0e-3f;
+float k_b = 0.01f;
+float c_t;
+
+float mdebug1, mdebug2, mdebug3, mdebug4, mdebug5;
+
+float pwm1,pwm2,pwm3,pwm4;
+
+Vec3f cmd_ang_acc;
+Vec3f cmd_ang_vel;
+Vec3f rateGyro_corr;
+
+//define new variables
+float estHeight = 0.0f;
+float estVelocity_1 = 0.0f;
+float estVelocity_2 = 0.0f;
+float estVelocity_3 = 0.0f;
+float lastHeightMeas_meas = 0.0f;
+float lastHeightMeas_time = 0.0f;
+
+//lab4
+float const timeConstant_rollRate = 0.04f; //Changed
+float const timeConstant_pitchRate = timeConstant_rollRate;
+float const timeConstant_yawRate = 0.5f; //Changed
+
+float const timeConstant_rollAngle = 0.4f; //Changed - original 0.04
+float const timeConstant_pitchAngle = timeConstant_rollAngle;
+float const timeConstant_yawAngle = 1.0f; // changed - original 0.25
+
+  //lab 5
+float const timeConst_horizVel = 2.0f; //changed from 2
+
+const float natFreq_height = 2.0f;
+const float dampingRatio_height = 0.7f;
+
+float kp = 0.5f;  // Proportional gain
+float ki = 0.1f;  // Integral gain
+float kd = 0.01f; // Derivative gain
+
+float integralErrorX = 0.0f;
+float integralErrorY = 0.0f;
+float previousErrorX = 0.0f;
+float previousErrorY = 0.0f;
+
+MainLoopOutput MainLoop(MainLoopInput const &in) {
+    MainLoopOutput outVals;
+
+    // Bias correction for gyro
+    if (in.currentTime < 1.0f) {
+        estGyroBias = estGyroBias + (in.imuMeasurement.rateGyro / 500.0f);
     }
-  },
-  "cells": [
-    {
-      "cell_type": "markdown",
-      "source": [
-        "didnt get connected on flashing the vehicle\n",
-        "make sure there is check mark on USB, replug drone ---> erase\n",
-        "\n",
-        "the window is too samll and could see the code clearly\n",
-        "when the drone is not connected via cable, connected to qua is not helpful\n",
-        "right control+C == find back the tool bar\n",
-        "\n",
-        "\n"
-      ],
-      "metadata": {
-        "id": "vTwTIvTmrr82"
-      }
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "MainLoopOutput MainLoop(MainLoopInput const &in) {\n",
-        "  MainLoopOutput outVals;\n",
-        "\n",
-        "  if(in.joystickInput.buttonBlue){\n",
-        "\n",
-        "    outVals.motorCommand1 = 50;\n",
-        "    outVals.motorCommand2 = 50;\n",
-        "    outVals.motorCommand3 = 50;\n",
-        "    outVals.motorCommand4 = 50;\n",
-        "\n",
-        "  }\n",
-        "  else{\n",
-        "    outVals.motorCommand1 = 0;\n",
-        "    outVals.motorCommand2 = 0;\n",
-        "    outVals.motorCommand3 = 0;\n",
-        "    outVals.motorCommand4 = 0;\n",
-        "  }\n",
-        "\n",
-        "  //copy the inputs and outputs:\n",
-        "  lastMainLoopInputs = in;\n",
-        "  lastMainLoopOutputs = outVals;\n",
-        "  return outVals;\n",
-        "}"
-      ],
-      "metadata": {
-        "id": "Dcqf_cNQsFko"
-      },
-      "execution_count": null,
-      "outputs": []
-    },
-    {
-      "cell_type": "markdown",
-      "source": [
-        "LAb2\n",
-        "If the battery level is below 3.6 , the drone cant be arms\n",
-        "\n",
-        "steps\n",
-        "build target , replug drone to erease\n",
-        "radio replug , select radio\n"
-      ],
-      "metadata": {
-        "id": "dJELqSgXhumN"
-      }
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "MainLoopOutput MainLoop(MainLoopInput const &in) {\n",
-        "  MainLoopOutput outVals;\n",
-        "  //If the blue button is clicked, turn all 4 motor speed to 50, otherwise turn off motor\n",
-        "  if(in.joystickInput.buttonBlue){\n",
-        "\n",
-        "    outVals.motorCommand1 = 127.55;\n",
-        "    outVals.motorCommand2 = 127.55;\n",
-        "    outVals.motorCommand3 = 127.55;\n",
-        "    outVals.motorCommand4 = 127.55;\n",
-        "\n",
-        "  }\n",
-        "\n",
-        "  else if(in.joystickInput.buttonGreen){\n",
-        "    outVals.motorCommand1 = 77.36;\n",
-        "    outVals.motorCommand2 = 77.36;\n",
-        "    outVals.motorCommand3 = 77.36;\n",
-        "    outVals.motorCommand4 = 77.36;\n",
-        "\n",
-        "  }\n",
-        "  else if(in.joystickInput.buttonYellow){\n",
-        "    outVals.motorCommand1 = 104.26;\n",
-        "    outVals.motorCommand2 = 104.26;\n",
-        "    outVals.motorCommand3 = 104.26;\n",
-        "    outVals.motorCommand4 = 104.26;\n",
-        "\n",
-        "  }\n",
-        "  else{\n",
-        "    outVals.motorCommand1 = 0;\n",
-        "    outVals.motorCommand2 = 0;\n",
-        "    outVals.motorCommand3 = 0;\n",
-        "    outVals.motorCommand4 = 0;\n",
-        "  }\n",
-        "\n",
-        "\n",
-        "  //copy the inputs and outputs:\n",
-        "  lastMainLoopInputs = in;\n",
-        "  lastMainLoopOutputs = outVals;\n",
-        "  return outVals;\n",
-        "}\n"
-      ],
-      "metadata": {
-        "id": "Z_WUMXED-_It"
-      },
-      "execution_count": null,
-      "outputs": []
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "#define float variable for speed converted from radian/sec\n",
-        "float pmw1 = pwmCommandFromSpeed(1000);\n",
-        "float pmw2 = pwmCommandFromSpeed(1200);\n",
-        "float pmw3 = pwmCommandFromSpeed(1400);\n",
-        "\n",
-        "\n",
-        "MainLoopOutput MainLoop(MainLoopInput const &in) {\n",
-        "  MainLoopOutput outVals;\n",
-        "  //If the blue button is clicked, turn all 4 motor speed to 50, otherwise turn off motor\n",
-        "  if(in.joystickInput.buttonBlue){\n",
-        "\n",
-        "    outVals.motorCommand1 = pmw1;\n",
-        "    outVals.motorCommand2 = pmw1;\n",
-        "    outVals.motorCommand3 = pmw1;\n",
-        "    outVals.motorCommand4 = pmw1;\n",
-        "\n",
-        "  }\n",
-        "\n",
-        "  else if(in.joystickInput.buttonGreen){\n",
-        "    outVals.motorCommand1 = pmw2;\n",
-        "    outVals.motorCommand2 = pmw2;\n",
-        "    outVals.motorCommand3 = pmw2;\n",
-        "    outVals.motorCommand4 = pmw2;\n",
-        "\n",
-        "  }\n",
-        "  else if(in.joystickInput.buttonYellow){\n",
-        "    outVals.motorCommand1 = pmw3;\n",
-        "    outVals.motorCommand2 = pmw3;\n",
-        "    outVals.motorCommand3 = pmw3;\n",
-        "    outVals.motorCommand4 = pmw3;\n",
-        "\n",
-        "  }\n",
-        "  else{\n",
-        "    outVals.motorCommand1 = 0;\n",
-        "    outVals.motorCommand2 = 0;\n",
-        "    outVals.motorCommand3 = 0;\n",
-        "    outVals.motorCommand4 = 0;\n",
-        "  }\n",
-        "\n",
-        "\n",
-        "\n",
-        "  //copy the inputs and outputs:\n",
-        "  lastMainLoopInputs = in;\n",
-        "  lastMainLoopOutputs = outVals;\n",
-        "  return outVals;\n",
-        "}\n"
-      ],
-      "metadata": {
-        "id": "BDDUueUoA10J"
-      },
-      "execution_count": null,
-      "outputs": []
-    },
-    {
-      "cell_type": "markdown",
-      "source": [
-        "## Lab 3"
-      ],
-      "metadata": {
-        "id": "mz4-tCe0YOme"
-      }
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "#include \"UserCode.hpp\"\n",
-        "#include \"UtilityFunctions.hpp\"\n",
-        "#include \"Vec3f.hpp\"\n",
-        "\n",
-        "#include <stdio.h> //for printf\n",
-        "\n",
-        "//An example of a variable that persists beyond the function call.\n",
-        "float exampleVariable_float = 0.0f;  //Note the trailing 'f' in the number. This is to force single precision floating point.\n",
-        "Vec3f exampleVariable_Vec3f = Vec3f(0, 0, 0);\n",
-        "int exampleVariable_int = 0;\n",
-        "\n",
-        "//We keep the last inputs and outputs around for debugging:\n",
-        "MainLoopInput lastMainLoopInputs;\n",
-        "MainLoopOutput lastMainLoopOutputs;\n",
-        "\n",
-        "//Some constants that we may use:\n",
-        "const float mass = 30e-3f;  // mass of the quadcopter [kg]\n",
-        "const float gravity = 9.81f;  // acceleration of gravity [m/s^2]\n",
-        "const float inertia_xx = 16e-6f;  //MMOI about x axis [kg.m^2]\n",
-        "const float inertia_yy = inertia_xx;  //MMOI about y axis [kg.m^2]\n",
-        "const float inertia_zz = 29e-6f;  //MMOI about z axis [kg.m^2]\n",
-        "\n",
-        "const float dt = 1.0f / 500.0f; //[s] period between successive calls to MainLoop\n",
-        "\n",
-        "\n",
-        "float pmw1 = pwmCommandFromSpeed(1000);\n",
-        "float pmw2 = pwmCommandFromSpeed(1200);\n",
-        "float pmw3 = pwmCommandFromSpeed(1400);\n",
-        "\n",
-        "//∗Outside∗ the main function:\n",
-        "float estRoll = 0;\n",
-        "float estPitch = 0;\n",
-        "float estYaw= 0;\n",
-        "float rho = 0.01;\n",
-        "float pitch_mean;\n",
-        "float roll_mean;\n",
-        "\n",
-        "//*Before* MainLoop\n",
-        "Vec3f estGyroBias = Vec3f(0, 0, 0);\n",
-        "\n",
-        "MainLoopOutput MainLoop(MainLoopInput const &in) {\n",
-        "  MainLoopOutput outVals;\n",
-        "  //If the blue button is clicked, turn all 4 motor speed to 50, otherwise turn off motor\n",
-        "  //*inside* MainLoop\n",
-        "  if (in.currentTime < 1.0f) {\n",
-        "    estGyroBias = estGyroBias + (in.imuMeasurement.rateGyro/500.0f);\n",
-        "  }\n",
-        "  outVals.rateGyro_corr = in.imuMeasurement.rateGyro - estGyroBias;\n",
-        "\n",
-        "  estRoll = estRoll + outVals.rateGyro_corr.x * 1.0f/500.0f;\n",
-        "  estPitch = estPitch + outVals.rateGyro_corr.y * 1.0f/500.0f;\n",
-        "  estYaw = estYaw + outVals.rateGyro_corr.z * 1.0f/500.0f;\n",
-        "\n",
-        "  pitch_mean = - lastMainLoopInputs.imuMeasurement.accelerometer.x / gravity;\n",
-        "\n",
-        "  roll_mean = - lastMainLoopInputs.imuMeasurement.accelerometer.y / gravity;\n",
-        "\n",
-        "\n",
-        "  if(in.joystickInput.buttonBlue){\n",
-        "\n",
-        "    outVals.motorCommand1 = pmw1;\n",
-        "    outVals.motorCommand2 = pmw1;\n",
-        "    outVals.motorCommand3 = pmw1;\n",
-        "    outVals.motorCommand4 = pmw1;\n",
-        "\n",
-        "  }\n",
-        "\n",
-        "  else if(in.joystickInput.buttonGreen){\n",
-        "    outVals.motorCommand1 = pmw2;\n",
-        "    outVals.motorCommand2 = pmw2;\n",
-        "    outVals.motorCommand3 = pmw2;\n",
-        "    outVals.motorCommand4 = pmw2;\n",
-        "\n",
-        "  }\n",
-        "  else if(in.joystickInput.buttonYellow){\n",
-        "    outVals.motorCommand1 = pmw3;\n",
-        "    outVals.motorCommand2 = pmw3;\n",
-        "    outVals.motorCommand3 = pmw3;\n",
-        "    outVals.motorCommand4 = pmw3;\n",
-        "\n",
-        "  }\n",
-        "  else{\n",
-        "    outVals.motorCommand1 = 0;\n",
-        "    outVals.motorCommand2 = 0;\n",
-        "    outVals.motorCommand3 = 0;\n",
-        "    outVals.motorCommand4 = 0;\n",
-        "  }\n",
-        "  //somewhere at the end of Mainloop\n",
-        "  outVals.telemetryOutputs_plusMinus100[0] = estRoll;\n",
-        "  outVals.telemetryOutputs_plusMinus100[1] = estPitch;\n",
-        "  outVals.telemetryOutputs_plusMinus100[2] = estYaw;\n",
-        "  outVals.telemetryOutputs_plusMinus100[3] = (1-rho)*estPitch + rho*pitch_mean;\n",
-        "  outVals.telemetryOutputs_plusMinus100[4] = (1-rho)*estRoll + rho*roll_mean;\n",
-        "  //copy the inputs and outputs:\n",
-        "  lastMainLoopInputs = in;\n",
-        "  lastMainLoopOutputs = outVals;\n",
-        "\n",
-        "\n",
-        "  return outVals;\n",
-        "}\n",
-        "\n",
-        "void PrintStatus() {//accelerometer\n",
-        "  printf(\"Acc: \");\n",
-        "  printf(\"x=%6.3f, \", double (lastMainLoopInputs.imuMeasurement.accelerometer.x));\n",
-        "  printf(\"y=%6.3f, \", double (lastMainLoopInputs.imuMeasurement.accelerometer.y));\n",
-        "  printf(\"z=%6.3f, \", double (lastMainLoopInputs.imuMeasurement.accelerometer.z));\n",
-        "  printf(\"\\n\"); //new line\n",
-        "  //rate gyro\n",
-        "  printf(\"Gyro: \");\n",
-        "  printf(\"x=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.x));\n",
-        "  printf(\"y=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.y));\n",
-        "  printf(\"z=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.z));\n",
-        "  printf(\"\\n\"); //new line\n",
-        "  printf(\"Gyro_corrected: \");\n",
-        "  printf(\"x=%6.3f, \", double(lastMainLoopOutputs.rateGyro_corr.x));\n",
-        "  printf(\"y=%6.3f, \", double(lastMainLoopOutputs.rateGyro_corr.y));\n",
-        "  printf(\"z=%6.3f, \", double(lastMainLoopOutputs.rateGyro_corr.z));\n",
-        "  printf(\"\\n\"); //new line\n",
-        "  printf(\"Attitude: \");\n",
-        "  printf(\"pitch=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[1]));\n",
-        "  printf(\"roll=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[0]));\n",
-        "  printf(\"yaw=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[2]));\n",
-        "  printf(\"\\n\"); //new line\n",
-        "  printf(\"pitch_v2=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[3]));\n",
-        "  printf(\"roll=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[4]));\n",
-        "\n",
-        "  //For a quick reference on the printf function, see: http://www.cplusplus.com/reference/cstdio/printf/\n",
-        "  // Note that \\n is a \"new line\" character.\n",
-        "  // Also, note that to print a `float` variable, you have to explicitly cast it to\n",
-        "  //  `double` in the printf function, and explicitly specify precision using something\n",
-        "  //  like %6.3f (six significant digits, three after the period). Example:\n",
-        "  //   printf(\"  exampleVariable_float = %6.3f\\n\", double(exampleVariable_float));\n",
-        "\n",
-        "  //Accelerometer measurement\n",
-        "  printf(\"Acc: \");\n",
-        "  printf(\"x=%6.3f, \",\n",
-        "         double(lastMainLoopInputs.imuMeasurement.accelerometer.x));\n",
-        "  printf(\"\\n\");  //new line\n",
-        "  printf(\"Gyro: \");\n",
-        "  printf(\"x=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.x));\n",
-        "  printf(\"\\n\");  //new line\n",
-        "\n",
-        "  printf(\"Example variable values:\\n\");\n",
-        "  printf(\"  exampleVariable_int = %d\\n\", exampleVariable_int);\n",
-        "  //Note that it is somewhat annoying to print float variables.\n",
-        "  //  We need to cast the variable as double, and we need to specify\n",
-        "  //  the number of digits we want (if you used simply \"%f\", it would\n",
-        "  //  truncate to an integer.\n",
-        "  //  Here, we print 6 digits, with three digits after the period.\n",
-        "  printf(\"  exampleVariable_float = %6.3f\\n\", double(exampleVariable_float));\n",
-        "\n",
-        "  //We print the Vec3f by printing it's three components independently:\n",
-        "  printf(\"  exampleVariable_Vec3f = (%6.3f, %6.3f, %6.3f)\\n\",\n",
-        "         double(exampleVariable_Vec3f.x), double(exampleVariable_Vec3f.y),\n",
-        "         double(exampleVariable_Vec3f.z));\n",
-        "\n",
-        "  //just an example of how we would inspect the last main loop inputs and outputs:\n",
-        "  printf(\"Last main loop inputs:\\n\");\n",
-        "  printf(\"  batt voltage = %6.3f\\n\",\n",
-        "         double(lastMainLoopInputs.batteryVoltage.value));\n",
-        "  printf(\"  JS buttons: \");\n",
-        "  if (lastMainLoopInputs.joystickInput.buttonRed)\n",
-        "    printf(\"buttonRed \");\n",
-        "  if (lastMainLoopInputs.joystickInput.buttonGreen)\n",
-        "    printf(\"buttonGreen \");\n",
-        "  if (lastMainLoopInputs.joystickInput.buttonBlue)\n",
-        "    printf(\"buttonBlue \");\n",
-        "  if (lastMainLoopInputs.joystickInput.buttonYellow)\n",
-        "    printf(\"buttonYellow \");\n",
-        "  if (lastMainLoopInputs.joystickInput.buttonStart)\n",
-        "    printf(\"buttonStart \");\n",
-        "  if (lastMainLoopInputs.joystickInput.buttonSelect)\n",
-        "    printf(\"buttonSelect \");\n",
-        "  printf(\"\\n\");\n",
-        "  printf(\"Last main loop outputs:\\n\");\n",
-        "  printf(\"  motor command 1 = %6.3f\\n\",\n",
-        "         double(lastMainLoopOutputs.motorCommand1));\n",
-        "}\n",
-        "\n"
-      ],
-      "metadata": {
-        "colab": {
-          "base_uri": "https://localhost:8080/",
-          "height": 106
-        },
-        "id": "KQ04yl28YTFI",
-        "outputId": "2312f2f5-910a-4116-f02e-96b6ced19d75"
-      },
-      "execution_count": null,
-      "outputs": [
-        {
-          "output_type": "error",
-          "ename": "SyntaxError",
-          "evalue": "invalid decimal literal (<ipython-input-1-dae0e315c414>, line 8)",
-          "traceback": [
-            "\u001b[0;36m  File \u001b[0;32m\"<ipython-input-1-dae0e315c414>\"\u001b[0;36m, line \u001b[0;32m8\u001b[0m\n\u001b[0;31m    float exampleVariable_float = 0.0f;  //Note the trailing 'f' in the number. This is to force single precision floating point.\u001b[0m\n\u001b[0m                                    ^\u001b[0m\n\u001b[0;31mSyntaxError\u001b[0m\u001b[0;31m:\u001b[0m invalid decimal literal\n"
-          ]
+    rateGyro_corr = in.imuMeasurement.rateGyro - estGyroBias;
+
+    // Estimate roll, pitch, yaw angles
+    estRoll = (1 - rho) * (estRoll + rateGyro_corr.x * dt) + rho * (float(in.imuMeasurement.accelerometer.y) / gravity);
+    estPitch = (1 - rho) * (estPitch + rateGyro_corr.y * dt) + rho * (float(in.imuMeasurement.accelerometer.x) / gravity);
+    estYaw = estYaw + rateGyro_corr.z * dt;
+
+    // Height and vertical velocity estimation
+    estHeight = estHeight + estVelocity_3 * dt;
+    estVelocity_3 = estVelocity_3; // Assume constant for simplicity
+
+    if (in.heightSensor.updated && in.heightSensor.value < 5.0f) {
+        float hMeas = in.heightSensor.value * cosf(estRoll) * cosf(estPitch);
+        estHeight = (1.0f - mixHeight) * estHeight + mixHeight * hMeas;
+        float v3Meas = (hMeas - lastHeightMeas_meas) / (in.currentTime - lastHeightMeas_time);
+        estVelocity_3 = (1.0f - mixHeight) * estVelocity_3 + mixHeight * v3Meas;
+        lastHeightMeas_meas = hMeas;
+        lastHeightMeas_time = in.currentTime;
+    }
+
+    // Horizontal velocity estimation with optical flow
+    if (in.opticalFlowSensor.updated) {
+        float sigma_1 = in.opticalFlowSensor.value_x;
+        float sigma_2 = in.opticalFlowSensor.value_y;
+        float div = cosf(estRoll) * cosf(estPitch);
+
+        if (div > 0.5f) {
+            float deltaPredict = estHeight / div;
+            float v1Meas = (-sigma_1 + in.imuMeasurement.rateGyro.y) * deltaPredict;
+            float v2Meas = (-sigma_2 - in.imuMeasurement.rateGyro.x) * deltaPredict;
+
+            estVelocity_1 = (1.0f - mixHorizVel) * estVelocity_1 + mixHorizVel * v1Meas;
+            estVelocity_2 = (1.0f - mixHorizVel) * estVelocity_2 + mixHorizVel * v2Meas;
         }
-      ]
-    },
-    {
-      "cell_type": "markdown",
-      "source": [
-        "## MainLoopType"
-      ],
-      "metadata": {
-        "id": "hu4rZtCKYdbv"
-      }
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "#pragma once\n",
-        "\n",
-        "#include <stdint.h>\n",
-        "\n",
-        "#include \"Vec3f.hpp\"//our standard vector type\n",
-        "\n",
-        "/*!\n",
-        " * This defines some types we use for the main loop.\n",
-        " */\n",
-        "struct MainLoopInput {\n",
-        "  float currentTime;  //[s]\n",
-        "\n",
-        "  struct {\n",
-        "    float value;  //[V]\n",
-        "    bool updated;\n",
-        "  } batteryVoltage;\n",
-        "\n",
-        "  struct {\n",
-        "    Vec3f accelerometer;  //[m/s**2]\n",
-        "    Vec3f rateGyro;  //[rad/s]\n",
-        "    bool updated;\n",
-        "  } imuMeasurement;\n",
-        "\n",
-        "  struct {\n",
-        "    float axisLeftVertical;  //no units\n",
-        "    float axisLeftHorizontal;  //no units\n",
-        "    float axisRightVertical;  //no units\n",
-        "    float axisRightHorizontal;  //no units\n",
-        "    bool buttonRed;\n",
-        "    bool buttonGreen;\n",
-        "    bool buttonBlue;\n",
-        "    bool buttonYellow;\n",
-        "    bool buttonStart;\n",
-        "    bool buttonSelect;\n",
-        "    bool updated;\n",
-        "  } joystickInput;\n",
-        "\n",
-        "  struct {\n",
-        "    float value_x; //[rad/s]\n",
-        "    float value_y; //[rad/s]\n",
-        "    bool updated;\n",
-        "  } opticalFlowSensor;\n",
-        "\n",
-        "  struct {\n",
-        "    float value;  //[m]\n",
-        "    bool updated;\n",
-        "  } heightSensor;\n",
-        "\n",
-        "  struct {\n",
-        "    //You probably don't need to access these, but we're providing them\n",
-        "    float imu_temperature; //[deg C] (provided for debugging purposes)\n",
-        "    //Magnetometer info\n",
-        "    //Barometer info\n",
-        "  } extra;\n",
-        "\n",
-        "};\n",
-        "\n",
-        "struct MainLoopOutput {\n",
-        "  int motorCommand1;  // located at body +x +y\n",
-        "  int motorCommand2;  // located at body +x -y\n",
-        "  int motorCommand3;  // located at body -x -y\n",
-        "  int motorCommand4;  // located at body -x +y\n",
-        "  Vec3f rateGyro_corr;\n",
-        "  float estRoll;\n",
-        "  float estPitch;\n",
-        "  float estYaw;\n",
-        "\n",
-        "  //variables that are only used for telemetry:\n",
-        "  float telemetryOutputs_plusMinus100[12];  // NOTE! These are bounded to be in +/- 100\n",
-        "};\n"
-      ],
-      "metadata": {
-        "id": "_8QXWP0nYgI9"
-      },
-      "execution_count": null,
-      "outputs": []
-    },
-    {
-      "cell_type": "markdown",
-      "source": [
-        "\n",
-        "Quad status : 0.0008 to 0.017\n",
-        "2pi = 6.28\n",
-        "Debug value 0 = roll angle\n",
-        "Debug value 1 = pitch angle\n",
-        "Debug value 2 = yam angle\n",
-        "Debug value 3 = update_pitch\n",
-        "Debug value 4 = update_roll\n",
-        "\n",
-        "3.4 the direction of pitch row yam is inversed\n"
-      ],
-      "metadata": {
-        "id": "0rPRV-Hs3_tc"
-      }
-    },
-    {
-      "cell_type": "markdown",
-      "source": [
-        "## LAB4"
-      ],
-      "metadata": {
-        "id": "T7Em7e-HWwGG"
-      }
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "#include \"UserCode.hpp\"\n",
-        "#include \"UtilityFunctions.hpp\"\n",
-        "#include \"Vec3f.hpp\"\n",
-        "\n",
-        "#include <stdio.h> //for printf\n",
-        "\n",
-        "//An example of a variable that persists beyond the function call.\n",
-        "float exampleVariable_float = 0.0f;  //Note the trailing 'f' in the number. This is to force single precision floating point.\n",
-        "Vec3f exampleVariable_Vec3f = Vec3f(0, 0, 0);\n",
-        "int exampleVariable_int = 0;\n",
-        "\n",
-        "//We keep the last inputs and outputs around for debugging:\n",
-        "MainLoopInput lastMainLoopInputs;\n",
-        "MainLoopOutput lastMainLoopOutputs;\n",
-        "\n",
-        "//Some constants that we may use:\n",
-        "const float mass = 30e-3f;  // mass of the quadcopter [kg]\n",
-        "const float gravity = 9.81f;  // acceleration of gravity [m/s^2]\n",
-        "const float inertia_xx = 16e-6f;  //MMOI about x axis [kg.m^2]\n",
-        "const float inertia_yy = inertia_xx;  //MMOI about y axis [kg.m^2]\n",
-        "const float inertia_zz = 29e-6f;  //MMOI about z axis [kg.m^2]\n",
-        "\n",
-        "const float dt = 1.0f / 500.0f; //[s] period between successive calls to MainLoop\n",
-        "\n",
-        "//∗Outside∗ the main function:\n",
-        "float estRoll = 0.0f;\n",
-        "float estPitch = 0.0f;\n",
-        "float estYaw= 0.0f;\n",
-        "float rho = 0.01f;\n",
-        "float pitch_mean;\n",
-        "float roll_mean;\n",
-        "float pitch_corrected;\n",
-        "float roll_corrected;\n",
-        "\n",
-        "//*Before* MainLoop\n",
-        "Vec3f estGyroBias = Vec3f(0.0f, 0.0f, 0.0f);\n",
-        "\n",
-        "//lab 4\n",
-        "//defining input for lab experiment\n",
-        "float desNormalizedAcceleration = 8.0f;\n",
-        "//Vec3f ang_acc = Vec3f(0.0f,0.0f,0.0f);\n",
-        "Vec3f ang_vel = Vec3f(0.0f,0.0f,0.0f);\n",
-        "Vec3f ang_angle = Vec3f(0.0f,0.0f,0.0f);\n",
-        "float n1;\n",
-        "float n2;\n",
-        "float n3;\n",
-        "float cp1;\n",
-        "float cp2;\n",
-        "float cp3;\n",
-        "float cp4;\n",
-        "float l_b = 33.0e-3f;\n",
-        "float k_b = 0.01f;\n",
-        "float c_t;\n",
-        "\n",
-        "float mdebug1, mdebug2, mdebug3, mdebug4;\n",
-        "\n",
-        "float pwm1,pwm2,pwm3,pwm4;\n",
-        "\n",
-        "Vec3f cmd_ang_acc;\n",
-        "Vec3f cmd_ang_vel;\n",
-        "\n",
-        "MainLoopOutput MainLoop(MainLoopInput const &in) {\n",
-        "  MainLoopOutput outVals;\n",
-        "  //If the blue button is clicked, turn all 4 motor speed to 50, otherwise turn off motor\n",
-        "  //*inside* MainLoop\n",
-        "  if (in.currentTime < 1.0f) {\n",
-        "    estGyroBias = estGyroBias + (in.imuMeasurement.rateGyro/500.0f);\n",
-        "  }\n",
-        "  outVals.rateGyro_corr = in.imuMeasurement.rateGyro - estGyroBias;\n",
-        "\n",
-        "  estRoll = estRoll + outVals.rateGyro_corr.x * 1.0f/500.0f;\n",
-        "  estPitch = estPitch + outVals.rateGyro_corr.y * 1.0f/500.0f;\n",
-        "  estYaw = estYaw + outVals.rateGyro_corr.z * 1.0f/500.0f;\n",
-        "\n",
-        "  pitch_mean = - lastMainLoopInputs.imuMeasurement.accelerometer.x / gravity;\n",
-        "\n",
-        "  roll_mean = lastMainLoopInputs.imuMeasurement.accelerometer.y / gravity;\n",
-        "\n",
-        "  pitch_corrected =  (1-rho)*estPitch + rho*pitch_mean;\n",
-        "  roll_corrected = (1-rho)*estRoll + rho*roll_mean;\n",
-        "\n",
-        "  //lab4\n",
-        "  c_t = desNormalizedAcceleration*mass;\n",
-        "  float const timeConstant_rollRate = 0.04f;\n",
-        "  float const timeConstant_pitchRate = timeConstant_rollRate;\n",
-        "  float const timeConstant_yawRate = 0.5f;\n",
-        "  float const timeConstant_rollAngle = 0.4f;\n",
-        "  float const timeConstant_pitchAngle = timeConstant_rollAngle;\n",
-        "  float const timeConstant_yawAngle = 1.0f;\n",
-        "\n",
-        "  //4.3.2 angle control\n",
-        "  cmd_ang_vel.x = -(1/timeConstant_rollAngle)*(roll_corrected - ang_angle.x);\n",
-        "  cmd_ang_vel.y = -(1/timeConstant_pitchAngle)*(pitch_corrected - ang_angle.y);\n",
-        "  cmd_ang_vel.z = -(1/timeConstant_rollAngle)*(estYaw - ang_angle.z);\n",
-        "\n",
-        "  //4.3.1 rate control\n",
-        " cmd_ang_acc.x = -(1/timeConstant_rollRate)*(outVals.rateGyro_corr.x - cmd_ang_vel.x);\n",
-        " cmd_ang_acc.y = -(1/timeConstant_pitchRate)*(outVals.rateGyro_corr.y - cmd_ang_vel.y);\n",
-        " cmd_ang_acc.z  = -(1/timeConstant_yawRate)*(outVals.rateGyro_corr.z - cmd_ang_vel.z);\n",
-        "\n",
-        "\n",
-        "\n",
-        "  n1 = inertia_xx*cmd_ang_acc.x;\n",
-        "  n2 = inertia_yy*cmd_ang_acc.y;\n",
-        "  n3 = inertia_zz*cmd_ang_acc.z;\n",
-        "\n",
-        "  cp1 = (1.0f/4.0f)*(c_t + n1/l_b - n2/l_b + n3/k_b);\n",
-        "  cp2 = (1.0f/4.0f)*(c_t - n1/l_b - n2/l_b - n3/k_b);\n",
-        "  cp3 = (1.0f/4.0f)*(c_t - n1/l_b + n2/l_b + n3/k_b);\n",
-        "  cp4 = (1.0f/4.0f)*(c_t + n1/l_b + n2/l_b - n3/k_b);\n",
-        "\n",
-        "  float power_test_lab2 = 0.0706;\n",
-        "\n",
-        "  mdebug1 = cp1;\n",
-        "  mdebug2 = speedFromForce(cp1);\n",
-        "  mdebug3 = pwmCommandFromSpeed(speedFromForce(cp1));\n",
-        "  mdebug4 = 0.0f;\n",
-        "\n",
-        "  pwm1 = pwmCommandFromSpeed(speedFromForce(cp1));\n",
-        "  pwm2 = pwmCommandFromSpeed(speedFromForce(cp2));\n",
-        "  pwm3 = pwmCommandFromSpeed(speedFromForce(cp3));\n",
-        "  pwm4 = pwmCommandFromSpeed(speedFromForce(cp4));\n",
-        "\n",
-        "  if(in.joystickInput.buttonBlue){\n",
-        "    outVals.motorCommand1 = pwm1;\n",
-        "    outVals.motorCommand2 = pwm2;\n",
-        "    outVals.motorCommand3 = pwm3;\n",
-        "    outVals.motorCommand4 = pwm4;\n",
-        "  }\n",
-        "  else {\n",
-        "    outVals.motorCommand1 = 0.0f;\n",
-        "    outVals.motorCommand2 = 0.0f;\n",
-        "    outVals.motorCommand3 = 0.0f;\n",
-        "    outVals.motorCommand4 = 0.0f;\n",
-        "  }\n",
-        "\n",
-        "\n",
-        "  //somewhere at the end of Mainloop\n",
-        "  outVals.telemetryOutputs_plusMinus100[0] = estRoll;\n",
-        "  outVals.telemetryOutputs_plusMinus100[1] = estPitch;\n",
-        "  outVals.telemetryOutputs_plusMinus100[2] = estYaw;\n",
-        "  outVals.telemetryOutputs_plusMinus100[3] =   pitch_corrected;\n",
-        "  outVals.telemetryOutputs_plusMinus100[4] = roll_corrected;\n",
-        "  outVals.telemetryOutputs_plusMinus100[5] = outVals.rateGyro_corr.z;\n",
-        "  outVals.telemetryOutputs_plusMinus100[6] =   cmd_ang_acc.x;\n",
-        "  outVals.telemetryOutputs_plusMinus100[7] = cmd_ang_acc.y;\n",
-        "  outVals.telemetryOutputs_plusMinus100[8] = cmd_ang_acc.z;\n",
-        "  outVals.telemetryOutputs_plusMinus100[9] =   cmd_ang_vel.x;\n",
-        "  outVals.telemetryOutputs_plusMinus100[10] = cmd_ang_vel.y;\n",
-        "  outVals.telemetryOutputs_plusMinus100[11] = cmd_ang_vel.z;\n",
-        "  //copy the inputs and outputs:\n",
-        "  lastMainLoopInputs = in;\n",
-        "  lastMainLoopOutputs = outVals;\n",
-        "\n",
-        "  return outVals;\n",
-        "}\n",
-        "\n",
-        "\n",
-        "void PrintStatus() {//accelerometer\n",
-        "  //checking\n",
-        "  printf(\"Debugs: %6.3f,%6.3f,%6.3f,%6.3f\\n\", double(mdebug1), double(mdebug2), double(mdebug3), double(mdebug4));\n",
-        "\n",
-        "  printf(\"Checking \");\n",
-        "  printf(\"total thrust =%6.3f, \", float (lastMainLoopOutputs.desNormalizedAcceleration));\n",
-        "  printf(\"cp1 =%6.3f, \", double (cp1));\n",
-        "  printf(\"ct =%6.3f, \", double (c_t));\n",
-        "  printf(\"\\n\"); //new line\n",
-        "  //printout motor command\n",
-        "//  printf(\"Motor Command \");\n",
-        "//  printf(\"1 =%6.3f, \", double (lastMainLoopOutputs.motorCommand1));\n",
-        "//  printf(\"2 =%6.3f, \", double (lastMainLoopOutputs.motorCommand2));\n",
-        "//  printf(\"3 =%6.3f, \", double (lastMainLoopOutputs.motorCommand3));\n",
-        "//  printf(\"4 =%6.3f, \", double (lastMainLoopOutputs.motorCommand4));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  printf(\"Acc: \");\n",
-        "//  printf(\"x=%6.3f, \", double (lastMainLoopInputs.imuMeasurement.accelerometer.x));\n",
-        "//  printf(\"y=%6.3f, \", double (lastMainLoopInputs.imuMeasurement.accelerometer.y));\n",
-        "//  printf(\"z=%6.3f, \", double (lastMainLoopInputs.imuMeasurement.accelerometer.z));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  //rate gyro\n",
-        "//  printf(\"Gyro: \");\n",
-        "//  printf(\"x=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.x));\n",
-        "//  printf(\"y=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.y));\n",
-        "//  printf(\"z=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.z));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  printf(\"Gyro_corrected: \");\n",
-        "//  printf(\"x=%6.3f, \", double(lastMainLoopOutputs.rateGyro_corr.x));\n",
-        "//  printf(\"y=%6.3f, \", double(lastMainLoopOutputs.rateGyro_corr.y));\n",
-        "//  printf(\"z=%6.3f, \", double(lastMainLoopOutputs.rateGyro_corr.z));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  printf(\"Attitude: \");\n",
-        "//  printf(\"pitch=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[1]));\n",
-        "//  printf(\"roll=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[0]));\n",
-        "//  printf(\"yaw=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[2]));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  printf(\"pitch_v2=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[3]));\n",
-        "//  printf(\"roll=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[4]));\n",
-        "\n",
-        "  //For a quick reference on the printf function, see: http://www.cplusplus.com/reference/cstdio/printf/\n",
-        "  // Note that \\n is a \"new line\" character.\n",
-        "  // Also, note that to print a `float` variable, you have to explicitly cast it to\n",
-        "  //  `double` in the printf function, and explicitly specify precision using something\n",
-        "  //  like %6.3f (six significant digits, three after the period). Example:\n",
-        "  //   printf(\"  exampleVariable_float = %6.3f\\n\", double(exampleVariable_float));\n",
-        "\n",
-        "  //Accelerometer measurement\n",
-        "//  printf(\"Acc: \");\n",
-        "//  printf(\"x=%6.3f, \",\n",
-        "//         double(lastMainLoopInputs.imuMeasurement.accelerometer.x));\n",
-        "//  printf(\"\\n\");  //new line\n",
-        "//  printf(\"Gyro: \");\n",
-        "//  printf(\"x=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.x));\n",
-        "//  printf(\"\\n\");  //new line\n",
-        "//\n",
-        "//  printf(\"Example variable values:\\n\");\n",
-        "//  printf(\"  exampleVariable_int = %d\\n\", exampleVariable_int);\n",
-        "  //Note that it is somewhat annoying to print float variables.\n",
-        "  //  We need to cast the variable as double, and we need to specify\n",
-        "  //  the number of digits we want (if you used simply \"%f\", it would\n",
-        "  //  truncate to an integer.\n",
-        "  //  Here, we print 6 digits, with three digits after the period.\n",
-        "  //printf(\"  exampleVariable_float = %6.3f\\n\", double(exampleVariable_float));\n",
-        "\n",
-        "  //We print the Vec3f by printing it's three components independently:\n",
-        "//  printf(\"  exampleVariable_Vec3f = (%6.3f, %6.3f, %6.3f)\\n\",\n",
-        "//         double(exampleVariable_Vec3f.x), double(exampleVariable_Vec3f.y),\n",
-        "//         double(exampleVariable_Vec3f.z));\n",
-        "\n",
-        "  //just an example of how we would inspect the last main loop inputs and outputs:\n",
-        "  printf(\"Last main loop inputs:\\n\");\n",
-        "  printf(\"  batt voltage = %6.3f\\n\",\n",
-        "         double(lastMainLoopInputs.batteryVoltage.value));\n",
-        "  printf(\"  JS buttons: \");\n",
-        "  if (lastMainLoopInputs.joystickInput.buttonRed)\n",
-        "    printf(\"buttonRed \");\n",
-        "  if (lastMainLoopInputs.joystickInput.buttonGreen)\n",
-        "    printf(\"buttonGreen \");\n",
-        "  if (lastMainLoopInputs.joystickInput.buttonBlue)\n",
-        "    printf(\"buttonBlue \");\n",
-        "  if (lastMainLoopInputs.joystickInput.buttonYellow)\n",
-        "    printf(\"buttonYellow \");\n",
-        "  if (lastMainLoopInputs.joystickInput.buttonStart)\n",
-        "    printf(\"buttonStart \");\n",
-        "  if (lastMainLoopInputs.joystickInput.buttonSelect)\n",
-        "    printf(\"buttonSelect \");\n",
-        "  printf(\"\\n\");\n",
-        "//  printf(\"Last main loop outputs:\\n\");\n",
-        "//  printf(\"  motor command 1 = %6.3f\\n\",\n",
-        "//         double(lastMainLoopOutputs.motorCommand1));\n",
-        "}\n"
-      ],
-      "metadata": {
-        "id": "oz7l_Y5MNE-f"
-      },
-      "execution_count": null,
-      "outputs": []
-    },
-    {
-      "cell_type": "markdown",
-      "source": [
-        "Mainloop type\n"
-      ],
-      "metadata": {
-        "id": "VM6b3_6fNThQ"
-      }
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "#pragma once\n",
-        "\n",
-        "#include <stdint.h>\n",
-        "\n",
-        "#include \"Vec3f.hpp\"//our standard vector type\n",
-        "\n",
-        "/*!\n",
-        " * This defines some types we use for the main loop.\n",
-        " */\n",
-        "struct MainLoopInput {\n",
-        "  float currentTime;  //[s]\n",
-        "\n",
-        "  struct {\n",
-        "    float value;  //[V]\n",
-        "    bool updated;\n",
-        "  } batteryVoltage;\n",
-        "\n",
-        "  struct {\n",
-        "    Vec3f accelerometer;  //[m/s**2]\n",
-        "    Vec3f rateGyro;  //[rad/s]\n",
-        "    bool updated;\n",
-        "  } imuMeasurement;\n",
-        "\n",
-        "  struct {\n",
-        "    float axisLeftVertical;  //no units\n",
-        "    float axisLeftHorizontal;  //no units\n",
-        "    float axisRightVertical;  //no units\n",
-        "    float axisRightHorizontal;  //no units\n",
-        "    bool buttonRed;\n",
-        "    bool buttonGreen;\n",
-        "    bool buttonBlue;\n",
-        "    bool buttonYellow;\n",
-        "    bool buttonStart;\n",
-        "    bool buttonSelect;\n",
-        "    bool updated;\n",
-        "  } joystickInput;\n",
-        "\n",
-        "  struct {\n",
-        "    float value_x; //[rad/s]\n",
-        "    float value_y; //[rad/s]\n",
-        "    bool updated;\n",
-        "  } opticalFlowSensor;\n",
-        "\n",
-        "  struct {\n",
-        "    float value;  //[m]\n",
-        "    bool updated;\n",
-        "  } heightSensor;\n",
-        "\n",
-        "  struct {\n",
-        "    //You probably don't need to access these, but we're providing them\n",
-        "    float imu_temperature; //[deg C] (provided for debugging purposes)\n",
-        "    //Magnetometer info\n",
-        "    //Barometer info\n",
-        "  } extra;\n",
-        "\n",
-        "};\n",
-        "\n",
-        "struct MainLoopOutput {\n",
-        "  int motorCommand1;  // located at body +x +y\n",
-        "  int motorCommand2;  // located at body +x -y\n",
-        "  int motorCommand3;  // located at body -x -y\n",
-        "  int motorCommand4;  // located at body -x +y\n",
-        "  Vec3f rateGyro_corr;\n",
-        "  float estRoll;\n",
-        "  float estPitch;\n",
-        "  float estYaw;\n",
-        "  float desNormalizedAcceleration;\n",
-        "  float cp1;\n",
-        "  float c_t;\n",
-        "  float pitch_corrected;\n",
-        "  float roll_corrected;\n",
-        "\n",
-        "  //variables that are only used for telemetry:\n",
-        "  float telemetryOutputs_plusMinus100[12];  // NOTE! These are bounded to be in +/- 100\n",
-        "};\n"
-      ],
-      "metadata": {
-        "id": "dUbvnl74NVp-"
-      },
-      "execution_count": null,
-      "outputs": []
-    },
-    {
-      "cell_type": "markdown",
-      "source": [
-        "Utility Function\n"
-      ],
-      "metadata": {
-        "id": "yZeOE--oNc6c"
-      }
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "#include \"UtilityFunctions.hpp\"\n",
-        "\n",
-        "int pwmCommandFromSpeed(float desiredSpeed_rad_per_sec) {\n",
-        "  // Replace these two coefficients with what you get\n",
-        "  // in the experiment. Note the trailing \"f\" after the\n",
-        "  // number -- this ensures that we use single precision\n",
-        "  // floating point (rather than double precision, which\n",
-        "  // would be substantially slower on the microcontroller).\n",
-        "  float a = -82.44f;  // the zeroth order term\n",
-        "  float b = 0.1336f;  // the first order term\n",
-        "\n",
-        "  return int((desiredSpeed_rad_per_sec*b + a));\n",
-        "}\n",
-        "\n",
-        "float speedFromForce(float desiredForce_N) {\n",
-        "  // replace this with your determined constant:\n",
-        "  // Remember to add the trailing \"f\" for single\n",
-        "  // precision!\n",
-        "  //From lab 2, our prop constance of 2*10-8\n",
-        "  float const propConstant = 2.0e-08f;\n",
-        "\n",
-        "  //we implement a safety check,\n",
-        "  //  (no sqrtf for negative numbers)\n",
-        "  if (desiredForce_N <= 0) {\n",
-        "    return 0.0f;\n",
-        "  }\n",
-        "\n",
-        "  return sqrtf(desiredForce_N / propConstant);\n",
-        "}\n",
-        "\n",
-        "\n",
-        "\n"
-      ],
-      "metadata": {
-        "id": "LGlaxGW_Nern"
-      },
-      "execution_count": null,
-      "outputs": []
-    },
-    {
-      "cell_type": "markdown",
-      "source": [
-        "# New Section MainloopType\n"
-      ],
-      "metadata": {
-        "id": "ZTkCIXsc423e"
-      }
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "#pragma once\n",
-        "\n",
-        "#include <stdint.h>\n",
-        "\n",
-        "#include \"Vec3f.hpp\"//our standard vector type\n",
-        "\n",
-        "/*!\n",
-        " * This defines some types we use for the main loop.\n",
-        " */\n",
-        "struct MainLoopInput {\n",
-        "  float currentTime;  //[s]\n",
-        "\n",
-        "  struct {\n",
-        "    float value;  //[V]\n",
-        "    bool updated;\n",
-        "  } batteryVoltage;\n",
-        "\n",
-        "  struct {\n",
-        "    Vec3f accelerometer;  //[m/s**2]\n",
-        "    Vec3f rateGyro;  //[rad/s]\n",
-        "    bool updated;\n",
-        "  } imuMeasurement;\n",
-        "\n",
-        "  struct {\n",
-        "    float axisLeftVertical;  //no units\n",
-        "    float axisLeftHorizontal;  //no units\n",
-        "    float axisRightVertical;  //no units\n",
-        "    float axisRightHorizontal;  //no units\n",
-        "    bool buttonRed;\n",
-        "    bool buttonGreen;\n",
-        "    bool buttonBlue;\n",
-        "    bool buttonYellow;\n",
-        "    bool buttonStart;\n",
-        "    bool buttonSelect;\n",
-        "    bool updated;\n",
-        "  } joystickInput;\n",
-        "\n",
-        "  struct {\n",
-        "    float value_x; //[rad/s]\n",
-        "    float value_y; //[rad/s]\n",
-        "    bool updated;\n",
-        "  } opticalFlowSensor;\n",
-        "\n",
-        "  struct {\n",
-        "    float value;  //[m]\n",
-        "    bool updated;\n",
-        "  } heightSensor;\n",
-        "\n",
-        "  struct {\n",
-        "    //You probably don't need to access these, but we're providing them\n",
-        "    float imu_temperature; //[deg C] (provided for debugging purposes)\n",
-        "    //Magnetometer info\n",
-        "    //Barometer info\n",
-        "  } extra;\n",
-        "\n",
-        "};\n",
-        "\n",
-        "struct MainLoopOutput {\n",
-        "  int motorCommand1;  // located at body +x +y\n",
-        "  int motorCommand2;  // located at body +x -y\n",
-        "  int motorCommand3;  // located at body -x -y\n",
-        "  int motorCommand4;  // located at body -x +y\n",
-        "\n",
-        "  //variables that are only used for telemetry:\n",
-        "  float telemetryOutputs_plusMinus100[12];  // NOTE! These are bounded to be in +/- 100\n",
-        "};\n"
-      ],
-      "metadata": {
-        "id": "SwvEtWQo45pm"
-      },
-      "execution_count": null,
-      "outputs": []
-    },
-    {
-      "cell_type": "markdown",
-      "source": [
-        "# USERCODE\n"
-      ],
-      "metadata": {
-        "id": "bdo7-IfW5AMW"
-      }
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "#include \"UserCode.hpp\"\n",
-        "#include \"UtilityFunctions.hpp\"\n",
-        "#include \"Vec3f.hpp\"\n",
-        "\n",
-        "#include <stdio.h> //for printf\n",
-        "#include <cmath>\n",
-        "\n",
-        "//An example of a variable that persists beyond the function call.\n",
-        "float exampleVariable_float = 0.0f;  //Note the trailing 'f' in the number. This is to force single precision floating point.\n",
-        "Vec3f exampleVariable_Vec3f = Vec3f(0, 0, 0);\n",
-        "int exampleVariable_int = 0;\n",
-        "\n",
-        "//We keep the last inputs and outputs around for debugging:\n",
-        "MainLoopInput lastMainLoopInputs;\n",
-        "MainLoopOutput lastMainLoopOutputs;\n",
-        "\n",
-        "//Some constants that we may use:\n",
-        "const float mass = 30e-3f;  // mass of the quadcopter [kg]\n",
-        "const float gravity = 9.81f;  // acceleration of gravity [m/s^2]\n",
-        "const float inertia_xx = 16e-6f;  //MMOI about x axis [kg.m^2]\n",
-        "const float inertia_yy = inertia_xx;  //MMOI about y axis [kg.m^2]\n",
-        "const float inertia_zz = 29e-6f;  //MMOI about z axis [kg.m^2]\n",
-        "\n",
-        "const float dt = 1.0f / 500.0f; //[s] period between successive calls to MainLoop\n",
-        "\n",
-        "\n",
-        "//∗Outside∗ the main function:\n",
-        "float estRoll = 0.0f;\n",
-        "float estPitch = 0.0f;\n",
-        "float estYaw= 0.0f;\n",
-        "float rho = 0.01f;\n",
-        "float pitch_mean;\n",
-        "float roll_mean;\n",
-        "float pitch_corrected = 0.0f;\n",
-        "float roll_corrected = 0.0f;\n",
-        "\n",
-        "//*Before* MainLoop\n",
-        "Vec3f estGyroBias = Vec3f(0.0f, 0.0f, 0.0f);\n",
-        "\n",
-        "//lab 4\n",
-        "//defining input for lab experiment\n",
-        "//float desNormalizedAcceleration = 8.0f;\n",
-        "//Vec3f ang_acc = Vec3f(0.0f,0.0f,0.0f);\n",
-        "Vec3f ang_vel = Vec3f(0.0f,0.0f,0.0f);\n",
-        "Vec3f ang_angle = Vec3f(0.0f,0.0f,0.0f);\n",
-        "float n1;\n",
-        "float n2;\n",
-        "float n3;\n",
-        "float cp1;\n",
-        "float cp2;\n",
-        "float cp3;\n",
-        "float cp4;\n",
-        "float l_b = 33.0e-3f;\n",
-        "float k_b = 0.01f;\n",
-        "float c_t;\n",
-        "\n",
-        "float mdebug1, mdebug2, mdebug3, mdebug4, mdebug5;\n",
-        "\n",
-        "float pwm1,pwm2,pwm3,pwm4;\n",
-        "\n",
-        "Vec3f cmd_ang_acc;\n",
-        "Vec3f cmd_ang_vel;\n",
-        "Vec3f rateGyro_corr;\n",
-        "\n",
-        "//define new variables\n",
-        "float estHeight = 0.0f;\n",
-        "float estVelocity_1 = 0.0f;\n",
-        "float estVelocity_2 = 0.0f;\n",
-        "float estVelocity_3 = 0.0f;\n",
-        "float lastHeightMeas_meas = 0.0f;\n",
-        "float lastHeightMeas_time = 0.0f;\n",
-        "float t_begin = 0.0f;\n",
-        "float t_now = 0.0f;\n",
-        "float s_left = 1.0f;\n",
-        "float moveComm = 0.0f;\n",
-        "\n",
-        "//lab4\n",
-        "\n",
-        "  float const timeConstant_rollRate = 0.05f; //Changed\n",
-        "  float const timeConstant_pitchRate = timeConstant_rollRate;\n",
-        "  float const timeConstant_yawRate = 0.05f; //Changed\n",
-        "\n",
-        "  float const timeConstant_rollAngle = 0.25f; //Changed\n",
-        "  float const timeConstant_pitchAngle = timeConstant_rollAngle;\n",
-        "  float const timeConstant_yawAngle = 0.25f; //Changed\n",
-        "\n",
-        "  //lab 5\n",
-        "  float const timeConst_horizVel = 2.0f;\n",
-        "\n",
-        "  const float natFreq_height = 2.0f;\n",
-        "  const float dampingRatio_height = 0.7f;\n",
-        "\n",
-        "MainLoopOutput MainLoop(MainLoopInput const &in) {\n",
-        "  MainLoopOutput outVals;\n",
-        "  //If the blue button is clicked, turn all 4 motor speed to 50, otherwise turn off motor\n",
-        "  //*inside* MainLoop\n",
-        "  if (in.currentTime < 1.0f) {\n",
-        "    estGyroBias = estGyroBias + (in.imuMeasurement.rateGyro/500.0f);\n",
-        "  }\n",
-        "  rateGyro_corr = in.imuMeasurement.rateGyro - estGyroBias;\n",
-        "\n",
-        "  estRoll = (1-rho)*(estRoll + rateGyro_corr.x * 1.0f/500.0f) + rho*(float(in.imuMeasurement.accelerometer.y) / gravity);\n",
-        "  estPitch = (1-rho)*(estPitch + rateGyro_corr.y * 1.0f/500.0f) + rho*(float(in.imuMeasurement.accelerometer.x)/ gravity);\n",
-        "  estYaw = estYaw + rateGyro_corr.z * 1.0f/500.0f;\n",
-        "\n",
-        "//  estRoll = estRoll + rateGyro_corr.x * 1.0f/500.0f;\n",
-        "//  estPitch = estPitch + rateGyro_corr.y * 1.0f/500.0f;\n",
-        "//  estYaw = estYaw + rateGyro_corr.z * 1.0f/500.0f;\n",
-        "//\n",
-        "//  pitch_mean = - lastMainLoopInputs.imuMeasurement.accelerometer.x / gravity;\n",
-        "//  roll_mean = lastMainLoopInputs.imuMeasurement.accelerometer.y / gravity;\n",
-        "//  pitch_corrected =  (1-rho)*estPitch + rho*pitch_mean;\n",
-        "//  roll_corrected = (1-rho)*estRoll + rho*roll_mean;\n",
-        "//prediction step\n",
-        "  //float dt = 1.0f/500.0f;\n",
-        "  estHeight = estHeight + estVelocity_3*1.0f/500.0f;\n",
-        "  estVelocity_3 = estVelocity_3 + 0;//assume constant\n",
-        "  estVelocity_1 = estVelocity_1 + 0;\n",
-        "  estVelocity_2 = estVelocity_2 + 0;\n",
-        "\n",
-        "// correction step\n",
-        "  float const mixHeight = 0.3f;\n",
-        "  if (in.heightSensor.updated){\n",
-        "    if(in.heightSensor.value < 5.0f){\n",
-        "      float hMeas = in.heightSensor.value * cosf(estRoll) * cosf(estPitch);\n",
-        "      estHeight = (1.0f-mixHeight)*estHeight + mixHeight*hMeas;\n",
-        "      float v3Meas = (hMeas-lastHeightMeas_meas)/(in.currentTime-lastHeightMeas_time);\n",
-        "      estVelocity_3 = (1.0f-mixHeight)*estVelocity_3+mixHeight*v3Meas;\n",
-        "      lastHeightMeas_meas=hMeas;\n",
-        "      lastHeightMeas_time=in.currentTime;\n",
-        "    }\n",
-        "  }\n",
-        "  float const mixHorizVel = 0.1f;\n",
-        "  if (in.opticalFlowSensor.updated){\n",
-        "    float sigma_1 = in.opticalFlowSensor.value_x;\n",
-        "    float sigma_2 = in.opticalFlowSensor.value_y;\n",
-        "    float div = (cosf(estRoll)*cosf(estPitch));\n",
-        "    if (div>0.5f){\n",
-        "      float deltaPredict = estHeight/div;\n",
-        "      float v1Meas = (-sigma_1 + in.imuMeasurement.rateGyro.y)*deltaPredict;\n",
-        "      float v2Meas = (-sigma_2 - in.imuMeasurement.rateGyro.x)*deltaPredict;\n",
-        "      estVelocity_1 = (1.0f-mixHorizVel)*estVelocity_1 + mixHorizVel*v1Meas;\n",
-        "      estVelocity_2 = (1.0f-mixHorizVel)*estVelocity_2 + mixHorizVel*v2Meas;\n",
-        "    }\n",
-        "  }\n",
-        "//////////////////////////////////\n",
-        "  if(in.joystickInput.buttonBlue){\n",
-        "    moveComm = 1;\n",
-        "  }\n",
-        "  if(in.joystickInput.buttonGreen){\n",
-        "    moveComm = 0;\n",
-        "    const float desHeight = 0.0f;\n",
-        "  }\n",
-        "  if(in.joystickInput.buttonYellow){\n",
-        "    const float desHeight = 0.12f;\n",
-        "  }\n",
-        "  else{\n",
-        "      const float desHeight = 0.0f;\n",
-        "  }\n",
-        "\n",
-        "   if (moveComm > 0 && HComm > 0) {\n",
-        "      t_begin = in.currentTime;\n",
-        "      float desAcc1 = s_left -(1/timeConst_horizVel)*estVelocity_1;\n",
-        "      float desAcc2 = -(1/timeConst_horizVel)*estVelocity_2;\n",
-        "      float desRoll = -desAcc2 / gravity;\n",
-        "      float desPitch = desAcc1 / gravity;\n",
-        "      float desYaw = 0;\n",
-        "      s_left = s_left - estVelocity_1*(1.0/500.0);\n",
-        "   }\n",
-        "   elseif (moveComm = 0 && HComm > 0) {\n",
-        "      float desAcc1 = -(1/timeConst_horizVel)*estVelocity_1;\n",
-        "      float desAcc2 = -(1/timeConst_horizVel)*estVelocity_2;\n",
-        "      float desRoll = -desAcc2 / gravity;\n",
-        "      float desPitch = desAcc1 / gravity;\n",
-        "      float desYaw = 0;\n",
-        "   }\n",
-        "\n",
-        "\n",
-        "\n",
-        "\n",
-        "////////////////////////////////////////////\n",
-        "  float desAcc1 = -(1/timeConst_horizVel)*estVelocity_1;\n",
-        "  float desAcc2 = -(1/timeConst_horizVel)*estVelocity_2;\n",
-        "  float desRoll = -desAcc2 / gravity;\n",
-        "  float desPitch = desAcc1 / gravity;\n",
-        "  float desYaw = 0;\n",
-        "\n",
-        "  const float desHeight = 0.12f;\n",
-        "  const float desAcc3 = -2*dampingRatio_height*natFreq_height*estVelocity_3-natFreq_height*natFreq_height*(estHeight-desHeight);\n",
-        "  float desNormalizedAcceleration=(gravity+desAcc3)/(cosf(estRoll)*cosf(estPitch));\n",
-        "  mdebug1 = estVelocity_1;\n",
-        "  mdebug2 = estVelocity_2;\n",
-        "  mdebug3 = 0.0;\n",
-        "  mdebug4 = estHeight;\n",
-        "  mdebug5 = estVelocity_3;\n",
-        "\n",
-        "  //attitude setpoint\n",
-        "  if(in.joystickInput.buttonYellow){\n",
-        "    ang_angle = Vec3f(0.0f,0.5236f,0.0f);\n",
-        "  }\n",
-        "  else {\n",
-        "    ang_angle = Vec3f(0.0f,0.0f,0.0f);\n",
-        "  }\n",
-        "\n",
-        "\n",
-        "  //4.3.2 angle control\n",
-        "  c_t = desNormalizedAcceleration*mass;\n",
-        "  cmd_ang_vel.x = -(1/timeConstant_rollAngle)*(roll_corrected - ang_angle.x);\n",
-        "  cmd_ang_vel.y = -(1/timeConstant_pitchAngle)*(pitch_corrected - ang_angle.y);\n",
-        "  cmd_ang_vel.z = -(1/timeConstant_rollAngle)*(estYaw - ang_angle.z);\n",
-        "\n",
-        "  //4.3.1 rate control\n",
-        " cmd_ang_acc.x = -(1/timeConstant_rollRate)*(rateGyro_corr.x - cmd_ang_vel.x);\n",
-        " cmd_ang_acc.y = -(1/timeConstant_pitchRate)*(rateGyro_corr.y - cmd_ang_vel.y);\n",
-        " cmd_ang_acc.z = -(1/timeConstant_yawRate)*(rateGyro_corr.z - cmd_ang_vel.z);\n",
-        "\n",
-        "\n",
-        "\n",
-        "  n1 = inertia_xx*cmd_ang_acc.x;\n",
-        "  n2 = inertia_yy*cmd_ang_acc.y;\n",
-        "  n3 = inertia_zz*cmd_ang_acc.z;\n",
-        "\n",
-        "  cp1 = (1.0f/4.0f)*(c_t + n1/l_b - n2/l_b + n3/k_b);\n",
-        "  cp2 = (1.0f/4.0f)*(c_t - n1/l_b - n2/l_b - n3/k_b);\n",
-        "  cp3 = (1.0f/4.0f)*(c_t - n1/l_b + n2/l_b + n3/k_b);\n",
-        "  cp4 = (1.0f/4.0f)*(c_t + n1/l_b + n2/l_b - n3/k_b);\n",
-        "\n",
-        "  float power_test_lab2 = 0.0706;\n",
-        "\n",
-        "\n",
-        "  pwm1 = pwmCommandFromSpeed(speedFromForce(cp1));\n",
-        "  pwm2 = pwmCommandFromSpeed(speedFromForce(cp2));\n",
-        "  pwm3 = pwmCommandFromSpeed(speedFromForce(cp3));\n",
-        "  pwm4 = pwmCommandFromSpeed(speedFromForce(cp4));\n",
-        "\n",
-        "  //if(in.joystickInput.buttonBlue){\n",
-        "    outVals.motorCommand1 = pwm1;\n",
-        "    outVals.motorCommand2 = pwm2;\n",
-        "    outVals.motorCommand3 = pwm3;\n",
-        "    outVals.motorCommand4 = pwm4;\n",
-        "  //}\n",
-        "//  else {\n",
-        "//    outVals.motorCommand1 = 0.0f;\n",
-        "//    outVals.motorCommand2 = 0.0f;\n",
-        "//    outVals.motorCommand3 = 0.0f;\n",
-        "//    outVals.motorCommand4 = 0.0f;\n",
-        "//  }\n",
-        "\n",
-        "\n",
-        "  //somewhere at the end of Mainloop\n",
-        "  outVals.telemetryOutputs_plusMinus100[0] = estRoll;\n",
-        "  outVals.telemetryOutputs_plusMinus100[1] = estPitch;\n",
-        "  outVals.telemetryOutputs_plusMinus100[2] = estYaw;\n",
-        "  outVals.telemetryOutputs_plusMinus100[3] = estVelocity_1;\n",
-        "  outVals.telemetryOutputs_plusMinus100[4] = estVelocity_2;\n",
-        "  outVals.telemetryOutputs_plusMinus100[5] = estVelocity_3;\n",
-        "  outVals.telemetryOutputs_plusMinus100[6] = estHeight;\n",
-        "  outVals.telemetryOutputs_plusMinus100[7] = desRoll;\n",
-        "  outVals.telemetryOutputs_plusMinus100[8] = desPitch;\n",
-        "  outVals.telemetryOutputs_plusMinus100[9] = desNormalizedAcceleration;\n",
-        "  outVals.telemetryOutputs_plusMinus100[10] = in.opticalFlowSensor.value_x;\n",
-        "  outVals.telemetryOutputs_plusMinus100[11] = in.opticalFlowSensor.value_y;\n",
-        "\n",
-        "  //copy the inputs and outputs:\n",
-        "  lastMainLoopInputs = in;\n",
-        "  lastMainLoopOutputs = outVals;\n",
-        "\n",
-        "  return outVals;\n",
-        "}\n",
-        "\n",
-        "\n",
-        "void PrintStatus() {//accelerometer\n",
-        "  //checking\n",
-        "  printf(\"Debugs: %6.3f,%6.3f,%6.3f,%6.3f,%6.3f\\n\", double(mdebug1), double(mdebug2), double(mdebug3), double(mdebug4), double(mdebug5));\n",
-        "\n",
-        "  printf(\"Checking \");\n",
-        "  //printf(\"total thrust =%6.3f, \", float (lastMainLoopOutputs.desNormalizedAcceleration));\n",
-        "  printf(\"cp1 =%6.3f, \", double (cp1));\n",
-        "  printf(\"ct =%6.3f, \", double (c_t));\n",
-        "  printf(\"\\n\"); //new line\n",
-        "\n",
-        "  printf(\"Last range = %6.3fm,\",\\\n",
-        "         double(lastMainLoopInputs.heightSensor.value));\n",
-        "  printf(\"Last flow: x=%6.3f, y=%6.3f\\n\",\\\n",
-        "         double(lastMainLoopInputs.opticalFlowSensor.value_x),\\\n",
-        "         double(lastMainLoopInputs.opticalFlowSensor.value_y));\n",
-        "  printf(\"estHeight = %6.3fm\\n\",\\\n",
-        "         double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[1]));\n",
-        "  printf(\"heightSensor_value = %6.3fm\\n\",\\\n",
-        "         double(lastMainLoopInputs.heightSensor.value));\n",
-        "  printf(\"height sensor updated = %6.3fm\\n\",\\\n",
-        "         double(lastMainLoopInputs.heightSensor.updated));\n",
-        "  printf(\"current time = %6.3fm\\n\",\\\n",
-        "         double(lastMainLoopInputs.currentTime));\n",
-        "\n",
-        "  //printout motor command\n",
-        "//  printf(\"Motor Command \");\n",
-        "//  printf(\"1 =%6.3f, \", double (lastMainLoopOutputs.motorCommand1));\n",
-        "//  printf(\"2 =%6.3f, \", double (lastMainLoopOutputs.motorCommand2));\n",
-        "//  printf(\"3 =%6.3f, \", double (lastMainLoopOutputs.motorCommand3));\n",
-        "//  printf(\"4 =%6.3f, \", double (lastMainLoopOutputs.motorCommand4));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  printf(\"Acc: \");\n",
-        "//  printf(\"x=%6.3f, \", double (lastMainLoopInputs.imuMeasurement.accelerometer.x));\n",
-        "//  printf(\"y=%6.3f, \", double (lastMainLoopInputs.imuMeasurement.accelerometer.y));\n",
-        "//  printf(\"z=%6.3f, \", double (lastMainLoopInputs.imuMeasurement.accelerometer.z));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  //rate gyro\n",
-        "//  printf(\"Gyro: \");\n",
-        "//  printf(\"x=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.x));\n",
-        "//  printf(\"y=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.y));\n",
-        "//  printf(\"z=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.z));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  printf(\"Gyro_corrected: \");\n",
-        "//  printf(\"x=%6.3f, \", double(lastMainLoopOutputs.rateGyro_corr.x));\n",
-        "//  printf(\"y=%6.3f, \", double(lastMainLoopOutputs.rateGyro_corr.y));\n",
-        "//  printf(\"z=%6.3f, \", double(lastMainLoopOutputs.rateGyro_corr.z));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  printf(\"Attitude: \");\n",
-        "//  printf(\"pitch=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[1]));\n",
-        "//  printf(\"roll=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[0]));\n",
-        "//  printf(\"yaw=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[2]));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  printf(\"pitch_v2=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[3]));\n",
-        "//  printf(\"roll=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[4]));\n",
-        "\n",
-        "  //For a quick reference on the printf function, see: http://www.cplusplus.com/reference/cstdio/printf/\n",
-        "  // Note that \\n is a \"new line\" character.\n",
-        "  // Also, note that to print a `float` variable, you have to explicitly cast it to\n",
-        "  //  `double` in the printf function, and explicitly specify precision using something\n",
-        "  //  like %6.3f (six significant digits, three after the period). Example:\n",
-        "  //   printf(\"  exampleVariable_float = %6.3f\\n\", double(exampleVariable_float));\n",
-        "\n",
-        "  //Accelerometer measurement\n",
-        "//  printf(\"Acc: \");\n",
-        "//  printf(\"x=%6.3f, \",\n",
-        "//         double(lastMainLoopInputs.imuMeasurement.accelerometer.x));\n",
-        "//  printf(\"\\n\");  //new line\n",
-        "//  printf(\"Gyro: \");\n",
-        "//  printf(\"x=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.x));\n",
-        "//  printf(\"\\n\");  //new line\n",
-        "//\n",
-        "//  printf(\"Example variable values:\\n\");\n",
-        "//  printf(\"  exampleVariable_int = %d\\n\", exampleVariable_int);\n",
-        "  //Note that it is somewhat annoying to print float variables.\n",
-        "  //  We need to cast the variable as double, and we need to specify\n",
-        "  //  the number of digits we want (if you used simply \"%f\", it would\n",
-        "  //  truncate to an integer.\n",
-        "  //  Here, we print 6 digits, with three digits after the period.\n",
-        "  //printf(\"  exampleVariable_float = %6.3f\\n\", double(exampleVariable_float));\n",
-        "\n",
-        "  //We print the Vec3f by printing it's three components independently:\n",
-        "//  printf(\"  exampleVariable_Vec3f = (%6.3f, %6.3f, %6.3f)\\n\",\n",
-        "//         double(exampleVariable_Vec3f.x), double(exampleVariable_Vec3f.y),\n",
-        "//         double(exampleVariable_Vec3f.z));\n",
-        "\n",
-        "  //just an example of how we would inspect the last main loop inputs and outputs:\n",
-        "//  printf(\"Last main loop inputs:\\n\");\n",
-        "//  printf(\"  batt voltage = %6.3f\\n\",\n",
-        "//         double(lastMainLoopInputs.batteryVoltage.value));\n",
-        "//  printf(\"  JS buttons: \");\n",
-        "//  if (lastMainLoopInputs.joystickInput.buttonRed)\n",
-        "//    printf(\"buttonRed \");\n",
-        "//  if (lastMainLoopInputs.joystickInput.buttonGreen)\n",
-        "//    printf(\"buttonGreen \");\n",
-        "//  if (lastMainLoopInputs.joystickInput.buttonBlue)\n",
-        "//    printf(\"buttonBlue \");\n",
-        "//  if (lastMainLoopInputs.joystickInput.buttonYellow)\n",
-        "//    printf(\"buttonYellow \");\n",
-        "//  if (lastMainLoopInputs.joystickInput.buttonStart)\n",
-        "//    printf(\"buttonStart \");\n",
-        "//  if (lastMainLoopInputs.joystickInput.buttonSelect)\n",
-        "//    printf(\"buttonSelect \");\n",
-        "//  printf(\"\\n\");\n",
-        "//  printf(\"Last main loop outputs:\\n\");\n",
-        "//  printf(\"  motor command 1 = %6.3f\\n\",\n",
-        "//         double(lastMainLoopOutputs.motorCommand1));\n",
-        "\n",
-        "}\n",
-        "\n",
-        "\n"
-      ],
-      "metadata": {
-        "id": "mkGy5XZr5Kuj"
-      },
-      "execution_count": null,
-      "outputs": []
-    },
-    {
-      "cell_type": "markdown",
-      "source": [
-        "# Utility Function\n"
-      ],
-      "metadata": {
-        "id": "IpihhmzM5MNX"
-      }
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "#include \"UtilityFunctions.hpp\"\n",
-        "\n",
-        "int pwmCommandFromSpeed(float desiredSpeed_rad_per_sec) {\n",
-        "  // Replace these two coefficients with what you get\n",
-        "  // in the experiment. Note the trailing \"f\" after the\n",
-        "  // number -- this ensures that we use single precision\n",
-        "  // floating point (rather than double precision, which\n",
-        "  // would be substantially slower on the microcontroller).\n",
-        "  float a = -82.44f;  // the zeroth order term\n",
-        "  float b = 0.1336f;  // the first order term\n",
-        "\n",
-        "  return int((desiredSpeed_rad_per_sec*b + a));\n",
-        "}\n",
-        "\n",
-        "float speedFromForce(float desiredForce_N) {\n",
-        "  // replace this with your determined constant:\n",
-        "  // Remember to add the trailing \"f\" for single\n",
-        "  // precision!\n",
-        "  //From lab 2, our prop constance of 2*10-8\n",
-        "  float const propConstant = 2.0e-08f;\n",
-        "\n",
-        "  //we implement a safety check,\n",
-        "  //  (no sqrtf for negative numbers)\n",
-        "  if (desiredForce_N <= 0) {\n",
-        "    return 0.0f;\n",
-        "  }\n",
-        "\n",
-        "  return sqrtf(desiredForce_N / propConstant);\n",
-        "}\n",
-        "\n"
-      ],
-      "metadata": {
-        "id": "fOZo_M2O5Rkv"
-      },
-      "execution_count": null,
-      "outputs": []
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "#include \"UserCode.hpp\"\n",
-        "#include \"UtilityFunctions.hpp\"\n",
-        "#include \"Vec3f.hpp\"\n",
-        "\n",
-        "#include <stdio.h> //for printf\n",
-        "#include <cmath>\n",
-        "\n",
-        "//An example of a variable that persists beyond the function call.\n",
-        "float exampleVariable_float = 0.0f;  //Note the trailing 'f' in the number. This is to force single precision floating point.\n",
-        "Vec3f exampleVariable_Vec3f = Vec3f(0, 0, 0);\n",
-        "int exampleVariable_int = 0;\n",
-        "\n",
-        "//We keep the last inputs and outputs around for debugging:\n",
-        "MainLoopInput lastMainLoopInputs;\n",
-        "MainLoopOutput lastMainLoopOutputs;\n",
-        "\n",
-        "//Some constants that we may use:\n",
-        "const float mass = 30e-3f;  // mass of the quadcopter [kg]\n",
-        "const float gravity = 9.81f;  // acceleration of gravity [m/s^2]\n",
-        "const float inertia_xx = 16e-6f;  //MMOI about x axis [kg.m^2]\n",
-        "const float inertia_yy = inertia_xx;  //MMOI about y axis [kg.m^2]\n",
-        "const float inertia_zz = 29e-6f;  //MMOI about z axis [kg.m^2]\n",
-        "\n",
-        "const float dt = 1.0f / 500.0f; //[s] period between successive calls to MainLoop\n",
-        "\n",
-        "\n",
-        "//∗Outside∗ the main function:\n",
-        "float estRoll = 0.0f;\n",
-        "float estPitch = 0.0f;\n",
-        "float estYaw= 0.0f;\n",
-        "float rho = 0.01f;\n",
-        "float pitch_mean;\n",
-        "float roll_mean;\n",
-        "float pitch_corrected = 0.0f;\n",
-        "float roll_corrected = 0.0f;\n",
-        "\n",
-        "//*Before* MainLoop\n",
-        "Vec3f estGyroBias = Vec3f(0.0f, 0.0f, 0.0f);\n",
-        "\n",
-        "//lab 4\n",
-        "//defining input for lab experiment\n",
-        "//float desNormalizedAcceleration = 8.0f;\n",
-        "//Vec3f ang_acc = Vec3f(0.0f,0.0f,0.0f);\n",
-        "Vec3f ang_vel = Vec3f(0.0f,0.0f,0.0f);\n",
-        "Vec3f ang_angle = Vec3f(0.0f,0.0f,0.0f);\n",
-        "float n1;\n",
-        "float n2;\n",
-        "float n3;\n",
-        "float cp1;\n",
-        "float cp2;\n",
-        "float cp3;\n",
-        "float cp4;\n",
-        "float l_b = 33.0e-3f;\n",
-        "float k_b = 0.01f;\n",
-        "float c_t;\n",
-        "\n",
-        "float mdebug1, mdebug2, mdebug3, mdebug4, mdebug5;\n",
-        "\n",
-        "float pwm1,pwm2,pwm3,pwm4;\n",
-        "\n",
-        "Vec3f cmd_ang_acc;\n",
-        "Vec3f cmd_ang_vel;\n",
-        "Vec3f rateGyro_corr;\n",
-        "\n",
-        "//define new variables\n",
-        "float estHeight = 0.0f;\n",
-        "float estVelocity_1 = 0.0f;\n",
-        "float estVelocity_2 = 0.0f;\n",
-        "float estVelocity_3 = 0.0f;\n",
-        "float lastHeightMeas_meas = 0.0f;\n",
-        "float lastHeightMeas_time = 0.0f;\n",
-        "\n",
-        "//lab4\n",
-        "\n",
-        "  float const timeConstant_rollRate = 0.04f; //Changed\n",
-        "  float const timeConstant_pitchRate = timeConstant_rollRate;\n",
-        "  float const timeConstant_yawRate = 0.5f; //Changed\n",
-        "\n",
-        "  float const timeConstant_rollAngle = 0.4f; //Changed - original 0.04\n",
-        "  float const timeConstant_pitchAngle = timeConstant_rollAngle;\n",
-        "  float const timeConstant_yawAngle = 1.0f; // changed - original 0.25\n",
-        "\n",
-        "  //lab 5\n",
-        "  float const timeConst_horizVel = 2.0f; //changed from 2\n",
-        "\n",
-        "  const float natFreq_height = 2.0f;\n",
-        "  const float dampingRatio_height = 0.7f;\n",
-        "\n",
-        "MainLoopOutput MainLoop(MainLoopInput const &in) {\n",
-        "  MainLoopOutput outVals;\n",
-        "  //If the blue button is clicked, turn all 4 motor speed to 50, otherwise turn off motor\n",
-        "  //*inside* MainLoop\n",
-        "  if (in.currentTime < 1.0f) {\n",
-        "    estGyroBias = estGyroBias + (in.imuMeasurement.rateGyro/500.0f);\n",
-        "  }\n",
-        "  rateGyro_corr = in.imuMeasurement.rateGyro - estGyroBias;\n",
-        "\n",
-        "  estRoll = (1-rho)*(estRoll + rateGyro_corr.x * 1.0f/500.0f) + rho*(float(in.imuMeasurement.accelerometer.y) / gravity);\n",
-        "  estPitch = (1-rho)*(estPitch + rateGyro_corr.y * 1.0f/500.0f) + rho*(float(in.imuMeasurement.accelerometer.x)/ gravity);\n",
-        "  estYaw = estYaw + rateGyro_corr.z * 1.0f/500.0f;\n",
-        "\n",
-        "//  estRoll = estRoll + rateGyro_corr.x * 1.0f/500.0f;\n",
-        "//  estPitch = estPitch + rateGyro_corr.y * 1.0f/500.0f;\n",
-        "//  estYaw = estYaw + rateGyro_corr.z * 1.0f/500.0f;\n",
-        "//\n",
-        "//  pitch_mean = - lastMainLoopInputs.imuMeasurement.accelerometer.x / gravity;\n",
-        "//  roll_mean = lastMainLoopInputs.imuMeasurement.accelerometer.y / gravity;\n",
-        "//  pitch_corrected =  (1-rho)*estPitch + rho*pitch_mean;\n",
-        "//  roll_corrected = (1-rho)*estRoll + rho*roll_mean;\n",
-        "//prediction step\n",
-        "  //float dt = 1.0f/500.0f;\n",
-        "  estHeight = estHeight + estVelocity_3*1.0f/500.0f;\n",
-        "  estVelocity_3 = estVelocity_3 + 0;//assume constant\n",
-        "  estVelocity_1 = estVelocity_1 + 0;\n",
-        "  estVelocity_2 = estVelocity_2 + 0;\n",
-        "\n",
-        "// correction step\n",
-        "  float const mixHeight = 0.3f;\n",
-        "  if (in.heightSensor.updated){\n",
-        "    if(in.heightSensor.value < 5.0f){\n",
-        "      float hMeas = in.heightSensor.value * cosf(estRoll) * cosf(estPitch);\n",
-        "      estHeight = (1.0f-mixHeight)*estHeight + mixHeight*hMeas;\n",
-        "      float v3Meas = (hMeas-lastHeightMeas_meas)/(in.currentTime-lastHeightMeas_time);\n",
-        "      estVelocity_3 = (1.0f-mixHeight)*estVelocity_3+mixHeight*v3Meas;\n",
-        "      lastHeightMeas_meas=hMeas;\n",
-        "      lastHeightMeas_time=in.currentTime;\n",
-        "    }\n",
-        "  }\n",
-        "  float const mixHorizVel = 0.1f;\n",
-        "  if (in.opticalFlowSensor.updated){\n",
-        "    float sigma_1 = in.opticalFlowSensor.value_x;\n",
-        "    float sigma_2 = in.opticalFlowSensor.value_y;\n",
-        "    float div = (cosf(estRoll)*cosf(estPitch));\n",
-        "    if (div>0.5f){\n",
-        "      float deltaPredict = estHeight/div;\n",
-        "      float v1Meas = (-sigma_1 + in.imuMeasurement.rateGyro.y)*deltaPredict;\n",
-        "      float v2Meas = (-sigma_2 - in.imuMeasurement.rateGyro.x)*deltaPredict;\n",
-        "      estVelocity_1 = (1.0f-mixHorizVel)*estVelocity_1 + mixHorizVel*v1Meas;\n",
-        "      estVelocity_2 = (1.0f-mixHorizVel)*estVelocity_2 + mixHorizVel*v2Meas;\n",
-        "    }\n",
-        "  }\n",
-        "\n",
-        "\n",
-        "\n",
-        "  float desAcc1 = -(1/timeConst_horizVel)*estVelocity_1;\n",
-        "  float desAcc2 = -(1/timeConst_horizVel)*estVelocity_2;\n",
-        "  float desRoll = -desAcc2 / gravity;\n",
-        "  float desPitch = desAcc1 / gravity;\n",
-        "  float desYaw = 0;\n",
-        "\n",
-        "  const float desHeight = 0.5f;\n",
-        "  const float desAcc3 = -2*dampingRatio_height*natFreq_height*estVelocity_3-natFreq_height*natFreq_height*(estHeight-desHeight);\n",
-        "  float desNormalizedAcceleration=(gravity+desAcc3)/(cosf(estRoll)*cosf(estPitch));\n",
-        "  mdebug1 = estVelocity_1;\n",
-        "  mdebug2 = estVelocity_2;\n",
-        "  mdebug3 = 0.0;\n",
-        "  mdebug4 = estHeight;\n",
-        "  mdebug5 = estVelocity_3;\n",
-        "\n",
-        "\n",
-        "  //4.3.2 angle control\n",
-        "  c_t = desNormalizedAcceleration*mass;\n",
-        "  cmd_ang_vel.x = -(1/timeConstant_rollAngle)*(estRoll -  desRoll); // replaced ang_angle.x with desRoll\n",
-        "  cmd_ang_vel.y = -(1/timeConstant_pitchAngle)*(estPitch - desPitch); //ang_angle.y\n",
-        "  cmd_ang_vel.z = -(1/timeConstant_rollAngle)*(estYaw - desYaw);// ang_angle.z\n",
-        "\n",
-        "  //4.3.1 rate control\n",
-        " cmd_ang_acc.x = -(1/timeConstant_rollRate)*(rateGyro_corr.x - cmd_ang_vel.x);\n",
-        " cmd_ang_acc.y = -(1/timeConstant_pitchRate)*(rateGyro_corr.y - cmd_ang_vel.y);\n",
-        " cmd_ang_acc.z = -(1/timeConstant_yawRate)*(rateGyro_corr.z - cmd_ang_vel.z);\n",
-        "\n",
-        "\n",
-        "\n",
-        "  n1 = inertia_xx*cmd_ang_acc.x;\n",
-        "  n2 = inertia_yy*cmd_ang_acc.y;\n",
-        "  n3 = inertia_zz*cmd_ang_acc.z;\n",
-        "\n",
-        "  cp1 = (1.0f/4.0f)*(c_t + n1/l_b - n2/l_b + n3/k_b);\n",
-        "  cp2 = (1.0f/4.0f)*(c_t - n1/l_b - n2/l_b - n3/k_b);\n",
-        "  cp3 = (1.0f/4.0f)*(c_t - n1/l_b + n2/l_b + n3/k_b);\n",
-        "  cp4 = (1.0f/4.0f)*(c_t + n1/l_b + n2/l_b - n3/k_b);\n",
-        "\n",
-        "  float power_test_lab2 = 0.0706;\n",
-        "\n",
-        "\n",
-        "  pwm1 = pwmCommandFromSpeed(speedFromForce(cp1));\n",
-        "  pwm2 = pwmCommandFromSpeed(speedFromForce(cp2));\n",
-        "  pwm3 = pwmCommandFromSpeed(speedFromForce(cp3));\n",
-        "  pwm4 = pwmCommandFromSpeed(speedFromForce(cp4));\n",
-        "\n",
-        "  //if(in.joystickInput.buttonBlue){\n",
-        "    outVals.motorCommand1 = pwm1;\n",
-        "    outVals.motorCommand2 = pwm2;\n",
-        "    outVals.motorCommand3 = pwm3;\n",
-        "    outVals.motorCommand4 = pwm4;\n",
-        "  //}\n",
-        "//  else {\n",
-        "//    outVals.motorCommand1 = 0.0f;\n",
-        "//    outVals.motorCommand2 = 0.0f;\n",
-        "//    outVals.motorCommand3 = 0.0f;\n",
-        "//    outVals.motorCommand4 = 0.0f;\n",
-        "//  }\n",
-        "\n",
-        "\n",
-        "  //somewhere at the end of Mainloop\n",
-        "  outVals.telemetryOutputs_plusMinus100[0] = estRoll;\n",
-        "  outVals.telemetryOutputs_plusMinus100[1] = estPitch;\n",
-        "  outVals.telemetryOutputs_plusMinus100[2] = estYaw;\n",
-        "  outVals.telemetryOutputs_plusMinus100[3] = estVelocity_1;\n",
-        "  outVals.telemetryOutputs_plusMinus100[4] = estVelocity_2;\n",
-        "  outVals.telemetryOutputs_plusMinus100[5] = estVelocity_3;\n",
-        "  outVals.telemetryOutputs_plusMinus100[6] = estHeight;\n",
-        "  outVals.telemetryOutputs_plusMinus100[7] = desRoll;\n",
-        "  outVals.telemetryOutputs_plusMinus100[8] = desPitch;\n",
-        "  outVals.telemetryOutputs_plusMinus100[9] = desNormalizedAcceleration;\n",
-        "  outVals.telemetryOutputs_plusMinus100[10] = in.opticalFlowSensor.value_x;\n",
-        "  outVals.telemetryOutputs_plusMinus100[11] = in.opticalFlowSensor.value_y;\n",
-        "\n",
-        "  //copy the inputs and outputs:\n",
-        "  lastMainLoopInputs = in;\n",
-        "  lastMainLoopOutputs = outVals;\n",
-        "\n",
-        "  return outVals;\n",
-        "}\n",
-        "\n",
-        "\n",
-        "void PrintStatus() {//accelerometer\n",
-        "  //checking\n",
-        "  printf(\"Debugs: %6.3f,%6.3f,%6.3f,%6.3f,%6.3f\\n\", double(mdebug1), double(mdebug2), double(mdebug3), double(mdebug4), double(mdebug5));\n",
-        "\n",
-        "  printf(\"Checking \");\n",
-        "  //printf(\"total thrust =%6.3f, \", float (lastMainLoopOutputs.desNormalizedAcceleration));\n",
-        "  printf(\"cp1 =%6.3f, \", double (cp1));\n",
-        "  printf(\"ct =%6.3f, \", double (c_t));\n",
-        "  printf(\"\\n\"); //new line\n",
-        "\n",
-        "  printf(\"Last range = %6.3fm,\",\\\n",
-        "         double(lastMainLoopInputs.heightSensor.value));\n",
-        "  printf(\"Last flow: x=%6.3f, y=%6.3f\\n\",\\\n",
-        "         double(lastMainLoopInputs.opticalFlowSensor.value_x),\\\n",
-        "         double(lastMainLoopInputs.opticalFlowSensor.value_y));\n",
-        "  printf(\"estHeight = %6.3fm\\n\",\\\n",
-        "         double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[1]));\n",
-        "  printf(\"heightSensor_value = %6.3fm\\n\",\\\n",
-        "         double(lastMainLoopInputs.heightSensor.value));\n",
-        "  printf(\"height sensor updated = %6.3fm\\n\",\\\n",
-        "         double(lastMainLoopInputs.heightSensor.updated));\n",
-        "  printf(\"current time = %6.3fm\\n\",\\\n",
-        "         double(lastMainLoopInputs.currentTime));\n",
-        "\n",
-        "  //printout motor command\n",
-        "//  printf(\"Motor Command \");\n",
-        "//  printf(\"1 =%6.3f, \", double (lastMainLoopOutputs.motorCommand1));\n",
-        "//  printf(\"2 =%6.3f, \", double (lastMainLoopOutputs.motorCommand2));\n",
-        "//  printf(\"3 =%6.3f, \", double (lastMainLoopOutputs.motorCommand3));\n",
-        "//  printf(\"4 =%6.3f, \", double (lastMainLoopOutputs.motorCommand4));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  printf(\"Acc: \");\n",
-        "//  printf(\"x=%6.3f, \", double (lastMainLoopInputs.imuMeasurement.accelerometer.x));\n",
-        "//  printf(\"y=%6.3f, \", double (lastMainLoopInputs.imuMeasurement.accelerometer.y));\n",
-        "//  printf(\"z=%6.3f, \", double (lastMainLoopInputs.imuMeasurement.accelerometer.z));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  //rate gyro\n",
-        "//  printf(\"Gyro: \");\n",
-        "//  printf(\"x=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.x));\n",
-        "//  printf(\"y=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.y));\n",
-        "//  printf(\"z=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.z));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  printf(\"Gyro_corrected: \");\n",
-        "//  printf(\"x=%6.3f, \", double(lastMainLoopOutputs.rateGyro_corr.x));\n",
-        "//  printf(\"y=%6.3f, \", double(lastMainLoopOutputs.rateGyro_corr.y));\n",
-        "//  printf(\"z=%6.3f, \", double(lastMainLoopOutputs.rateGyro_corr.z));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  printf(\"Attitude: \");\n",
-        "//  printf(\"pitch=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[1]));\n",
-        "//  printf(\"roll=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[0]));\n",
-        "//  printf(\"yaw=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[2]));\n",
-        "//  printf(\"\\n\"); //new line\n",
-        "//  printf(\"pitch_v2=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[3]));\n",
-        "//  printf(\"roll=%6.3f, \", double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[4]));\n",
-        "\n",
-        "  //For a quick reference on the printf function, see: http://www.cplusplus.com/reference/cstdio/printf/\n",
-        "  // Note that \\n is a \"new line\" character.\n",
-        "  // Also, note that to print a `float` variable, you have to explicitly cast it to\n",
-        "  //  `double` in the printf function, and explicitly specify precision using something\n",
-        "  //  like %6.3f (six significant digits, three after the period). Example:\n",
-        "  //   printf(\"  exampleVariable_float = %6.3f\\n\", double(exampleVariable_float));\n",
-        "\n",
-        "  //Accelerometer measurement\n",
-        "//  printf(\"Acc: \");\n",
-        "//  printf(\"x=%6.3f, \",\n",
-        "//         double(lastMainLoopInputs.imuMeasurement.accelerometer.x));\n",
-        "//  printf(\"\\n\");  //new line\n",
-        "//  printf(\"Gyro: \");\n",
-        "//  printf(\"x=%6.3f, \", double(lastMainLoopInputs.imuMeasurement.rateGyro.x));\n",
-        "//  printf(\"\\n\");  //new line\n",
-        "//\n",
-        "//  printf(\"Example variable values:\\n\");\n",
-        "//  printf(\"  exampleVariable_int = %d\\n\", exampleVariable_int);\n",
-        "  //Note that it is somewhat annoying to print float variables.\n",
-        "  //  We need to cast the variable as double, and we need to specify\n",
-        "  //  the number of digits we want (if you used simply \"%f\", it would\n",
-        "  //  truncate to an integer.\n",
-        "  //  Here, we print 6 digits, with three digits after the period.\n",
-        "  //printf(\"  exampleVariable_float = %6.3f\\n\", double(exampleVariable_float));\n",
-        "\n",
-        "  //We print the Vec3f by printing it's three components independently:\n",
-        "//  printf(\"  exampleVariable_Vec3f = (%6.3f, %6.3f, %6.3f)\\n\",\n",
-        "//         double(exampleVariable_Vec3f.x), double(exampleVariable_Vec3f.y),\n",
-        "//         double(exampleVariable_Vec3f.z));\n",
-        "\n",
-        "  //just an example of how we would inspect the last main loop inputs and outputs:\n",
-        "//  printf(\"Last main loop inputs:\\n\");\n",
-        "//  printf(\"  batt voltage = %6.3f\\n\",\n",
-        "//         double(lastMainLoopInputs.batteryVoltage.value));\n",
-        "//  printf(\"  JS buttons: \");\n",
-        "//  if (lastMainLoopInputs.joystickInput.buttonRed)\n",
-        "//    printf(\"buttonRed \");\n",
-        "//  if (lastMainLoopInputs.joystickInput.buttonGreen)\n",
-        "//    printf(\"buttonGreen \");\n",
-        "//  if (lastMainLoopInputs.joystickInput.buttonBlue)\n",
-        "//    printf(\"buttonBlue \");\n",
-        "//  if (lastMainLoopInputs.joystickInput.buttonYellow)\n",
-        "//    printf(\"buttonYellow \");\n",
-        "//  if (lastMainLoopInputs.joystickInput.buttonStart)\n",
-        "//    printf(\"buttonStart \");\n",
-        "//  if (lastMainLoopInputs.joystickInput.buttonSelect)\n",
-        "//    printf(\"buttonSelect \");\n",
-        "//  printf(\"\\n\");\n",
-        "//  printf(\"Last main loop outputs:\\n\");\n",
-        "//  printf(\"  motor command 1 = %6.3f\\n\",\n",
-        "//         double(lastMainLoopOutputs.motorCommand1));\n",
-        "\n",
-        "}\n"
-      ],
-      "metadata": {
-        "id": "y0PyUGM6ERMm"
-      },
-      "execution_count": null,
-      "outputs": []
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "#include \"UserCode.hpp\"\n",
-        "#include \"UtilityFunctions.hpp\"\n",
-        "#include \"Vec3f.hpp\"\n",
-        "\n",
-        "#include <stdio.h> //for printf\n",
-        "#include <cmath>\n",
-        "\n",
-        "//An example of a variable that persists beyond the function call.\n",
-        "float exampleVariable_float = 0.0f;  //Note the trailing 'f' in the number. This is to force single precision floating point.\n",
-        "Vec3f exampleVariable_Vec3f = Vec3f(0, 0, 0);\n",
-        "int exampleVariable_int = 0;\n",
-        "\n",
-        "//We keep the last inputs and outputs around for debugging:\n",
-        "MainLoopInput lastMainLoopInputs;\n",
-        "MainLoopOutput lastMainLoopOutputs;\n",
-        "\n",
-        "//Some constants that we may use:\n",
-        "const float mass = 30e-3f;  // mass of the quadcopter [kg]\n",
-        "const float gravity = 9.81f;  // acceleration of gravity [m/s^2]\n",
-        "const float inertia_xx = 16e-6f;  //MMOI about x axis [kg.m^2]\n",
-        "const float inertia_yy = inertia_xx;  //MMOI about y axis [kg.m^2]\n",
-        "const float inertia_zz = 29e-6f;  //MMOI about z axis [kg.m^2]\n",
-        "\n",
-        "const float dt = 1.0f / 500.0f; //[s] period between successive calls to MainLoop\n",
-        "\n",
-        "\n",
-        "//∗Outside∗ the main function:\n",
-        "float estRoll = 0.0f;\n",
-        "float estPitch = 0.0f;\n",
-        "float estYaw= 0.0f;\n",
-        "float rho = 0.01f;\n",
-        "float pitch_mean;\n",
-        "float roll_mean;\n",
-        "float pitch_corrected = 0.0f;\n",
-        "float roll_corrected = 0.0f;\n",
-        "\n",
-        "//*Before* MainLoop\n",
-        "Vec3f estGyroBias = Vec3f(0.0f, 0.0f, 0.0f);\n",
-        "\n",
-        "//lab 4\n",
-        "//defining input for lab experiment\n",
-        "//float desNormalizedAcceleration = 8.0f;\n",
-        "//Vec3f ang_acc = Vec3f(0.0f,0.0f,0.0f);\n",
-        "Vec3f ang_vel = Vec3f(0.0f,0.0f,0.0f);\n",
-        "Vec3f ang_angle = Vec3f(0.0f,0.0f,0.0f);\n",
-        "float n1;\n",
-        "float n2;\n",
-        "float n3;\n",
-        "float cp1;\n",
-        "float cp2;\n",
-        "float cp3;\n",
-        "float cp4;\n",
-        "float l_b = 33.0e-3f;\n",
-        "float k_b = 0.01f;\n",
-        "float c_t;\n",
-        "\n",
-        "float mdebug1, mdebug2, mdebug3, mdebug4, mdebug5;\n",
-        "\n",
-        "float pwm1,pwm2,pwm3,pwm4;\n",
-        "\n",
-        "Vec3f cmd_ang_acc;\n",
-        "Vec3f cmd_ang_vel;\n",
-        "Vec3f rateGyro_corr;\n",
-        "\n",
-        "//define new variables\n",
-        "float estHeight = 0.0f;\n",
-        "float estVelocity_1 = 0.0f;\n",
-        "float estVelocity_2 = 0.0f;\n",
-        "float estVelocity_3 = 0.0f;\n",
-        "float lastHeightMeas_meas = 0.0f;\n",
-        "float lastHeightMeas_time = 0.0f;\n",
-        "\n",
-        "//lab4\n",
-        "float const timeConstant_rollRate = 0.04f; //Changed\n",
-        "float const timeConstant_pitchRate = timeConstant_rollRate;\n",
-        "float const timeConstant_yawRate = 0.5f; //Changed\n",
-        "\n",
-        "float const timeConstant_rollAngle = 0.4f; //Changed - original 0.04\n",
-        "float const timeConstant_pitchAngle = timeConstant_rollAngle;\n",
-        "float const timeConstant_yawAngle = 1.0f; // changed - original 0.25\n",
-        "\n",
-        "  //lab 5\n",
-        "float const timeConst_horizVel = 2.0f; //changed from 2\n",
-        "\n",
-        "const float natFreq_height = 2.0f;\n",
-        "const float dampingRatio_height = 0.7f;\n",
-        "\n",
-        "float kp = 0.5f;  // Proportional gain\n",
-        "float ki = 0.1f;  // Integral gain\n",
-        "float kd = 0.01f; // Derivative gain\n",
-        "\n",
-        "float integralErrorX = 0.0f;\n",
-        "float integralErrorY = 0.0f;\n",
-        "float previousErrorX = 0.0f;\n",
-        "float previousErrorY = 0.0f;\n",
-        "\n",
-        "MainLoopOutput MainLoop(MainLoopInput const &in) {\n",
-        "    MainLoopOutput outVals;\n",
-        "\n",
-        "    // Bias correction for gyro\n",
-        "    if (in.currentTime < 1.0f) {\n",
-        "        estGyroBias = estGyroBias + (in.imuMeasurement.rateGyro / 500.0f);\n",
-        "    }\n",
-        "    rateGyro_corr = in.imuMeasurement.rateGyro - estGyroBias;\n",
-        "\n",
-        "    // Estimate roll, pitch, yaw angles\n",
-        "    estRoll = (1 - rho) * (estRoll + rateGyro_corr.x * dt) + rho * (float(in.imuMeasurement.accelerometer.y) / gravity);\n",
-        "    estPitch = (1 - rho) * (estPitch + rateGyro_corr.y * dt) + rho * (float(in.imuMeasurement.accelerometer.x) / gravity);\n",
-        "    estYaw = estYaw + rateGyro_corr.z * dt;\n",
-        "\n",
-        "    // Height and vertical velocity estimation\n",
-        "    estHeight = estHeight + estVelocity_3 * dt;\n",
-        "    estVelocity_3 = estVelocity_3; // Assume constant for simplicity\n",
-        "\n",
-        "    if (in.heightSensor.updated && in.heightSensor.value < 5.0f) {\n",
-        "        float hMeas = in.heightSensor.value * cosf(estRoll) * cosf(estPitch);\n",
-        "        estHeight = (1.0f - mixHeight) * estHeight + mixHeight * hMeas;\n",
-        "        float v3Meas = (hMeas - lastHeightMeas_meas) / (in.currentTime - lastHeightMeas_time);\n",
-        "        estVelocity_3 = (1.0f - mixHeight) * estVelocity_3 + mixHeight * v3Meas;\n",
-        "        lastHeightMeas_meas = hMeas;\n",
-        "        lastHeightMeas_time = in.currentTime;\n",
-        "    }\n",
-        "\n",
-        "    // Horizontal velocity estimation with optical flow\n",
-        "    if (in.opticalFlowSensor.updated) {\n",
-        "        float sigma_1 = in.opticalFlowSensor.value_x;\n",
-        "        float sigma_2 = in.opticalFlowSensor.value_y;\n",
-        "        float div = cosf(estRoll) * cosf(estPitch);\n",
-        "\n",
-        "        if (div > 0.5f) {\n",
-        "            float deltaPredict = estHeight / div;\n",
-        "            float v1Meas = (-sigma_1 + in.imuMeasurement.rateGyro.y) * deltaPredict;\n",
-        "            float v2Meas = (-sigma_2 - in.imuMeasurement.rateGyro.x) * deltaPredict;\n",
-        "\n",
-        "            estVelocity_1 = (1.0f - mixHorizVel) * estVelocity_1 + mixHorizVel * v1Meas;\n",
-        "            estVelocity_2 = (1.0f - mixHorizVel) * estVelocity_2 + mixHorizVel * v2Meas;\n",
-        "        }\n",
-        "    }\n",
-        "\n",
-        "    // PID controller for drift compensation\n",
-        "    float errorX = -estVelocity_1; // Desired velocity is 0\n",
-        "    float errorY = -estVelocity_2; // Desired velocity is 0\n",
-        "\n",
-        "    integralErrorX += errorX * dt;\n",
-        "    integralErrorY += errorY * dt;\n",
-        "\n",
-        "    float derivativeErrorX = (errorX - previousErrorX) / dt;\n",
-        "    float derivativeErrorY = (errorY - previousErrorY) / dt;\n",
-        "\n",
-        "    previousErrorX = errorX;\n",
-        "    previousErrorY = errorY;\n",
-        "\n",
-        "    float correctionX = kp * errorX + ki * integralErrorX + kd * derivativeErrorX;\n",
-        "    float correctionY = kp * errorY + ki * integralErrorY + kd * derivativeErrorY;\n",
-        "\n",
-        "    // Adjust desired roll and pitch angles based on drift correction\n",
-        "    float desRoll = correctionY / gravity;\n",
-        "    float desPitch = -correctionX / gravity;\n",
-        "    float desYaw = 0.0f; // Maintain stable yaw\n",
-        "\n",
-        "    // Height control\n",
-        "    float desHeight = 0.5f;\n",
-        "    float desAcc3 = -2 * dampingRatio_height * natFreq_height * estVelocity_3 -\n",
-        "                    natFreq_height * natFreq_height * (estHeight - desHeight);\n",
-        "    float desNormalizedAcceleration = (gravity + desAcc3) / (cosf(estRoll) * cosf(estPitch));\n",
-        "\n",
-        "    // Control motor commands\n",
-        "    c_t = desNormalizedAcceleration * mass;\n",
-        "    cmd_ang_vel.x = -(1 / timeConstant_rollAngle) * (estRoll - desRoll);\n",
-        "    cmd_ang_vel.y = -(1 / timeConstant_pitchAngle) * (estPitch - desPitch);\n",
-        "    cmd_ang_vel.z = -(1 / timeConstant_yawAngle) * (estYaw - desYaw);\n",
-        "\n",
-        "    cmd_ang_acc.x = -(1 / timeConstant_rollRate) * (rateGyro_corr.x - cmd_ang_vel.x);\n",
-        "    cmd_ang_acc.y = -(1 / timeConstant_pitchRate) * (rateGyro_corr.y - cmd_ang_vel.y);\n",
-        "    cmd_ang_acc.z = -(1 / timeConstant_yawRate) * (rateGyro_corr.z - cmd_ang_vel.z);\n",
-        "\n",
-        "    // Compute forces\n",
-        "    n1 = inertia_xx * cmd_ang_acc.x;\n",
-        "    n2 = inertia_yy * cmd_ang_acc.y;\n",
-        "    n3 = inertia_zz * cmd_ang_acc.z;\n",
-        "\n",
-        "    cp1 = (1.0f / 4.0f) * (c_t + n1 / l_b - n2 / l_b + n3 / k_b);\n",
-        "    cp2 = (1.0f / 4.0f) * (c_t - n1 / l_b - n2 / l_b - n3 / k_b);\n",
-        "    cp3 = (1.0f / 4.0f) * (c_t - n1 / l_b + n2 / l_b + n3 / k_b);\n",
-        "    cp4 = (1.0f / 4.0f) * (c_t + n1 / l_b + n2 / l_b - n3 / k_b);\n",
-        "\n",
-        "    pwm1 = pwmCommandFromSpeed(speedFromForce(cp1));\n",
-        "    pwm2 = pwmCommandFromSpeed(speedFromForce(cp2));\n",
-        "    pwm3 = pwmCommandFromSpeed(speedFromForce(cp3));\n",
-        "    pwm4 = pwmCommandFromSpeed(speedFromForce(cp4));\n",
-        "\n",
-        "    outVals.motorCommand1 = pwm1;\n",
-        "    outVals.motorCommand2 = pwm2;\n",
-        "    outVals.motorCommand3 = pwm3;\n",
-        "    outVals.motorCommand4 = pwm4;\n",
-        "\n",
-        "  return outVals;\n",
-        "}\n",
-        "\n",
-        "\n",
-        "void PrintStatus() {//accelerometer\n",
-        "  //checking\n",
-        "  printf(\"Debugs: %6.3f,%6.3f,%6.3f,%6.3f,%6.3f\\n\", double(mdebug1), double(mdebug2), double(mdebug3), double(mdebug4), double(mdebug5));\n",
-        "\n",
-        "  printf(\"Checking \");\n",
-        "  //printf(\"total thrust =%6.3f, \", float (lastMainLoopOutputs.desNormalizedAcceleration));\n",
-        "  printf(\"cp1 =%6.3f, \", double (cp1));\n",
-        "  printf(\"ct =%6.3f, \", double (c_t));\n",
-        "  printf(\"\\n\"); //new line\n",
-        "\n",
-        "  printf(\"Last range = %6.3fm,\",\\\n",
-        "         double(lastMainLoopInputs.heightSensor.value));\n",
-        "  printf(\"Last flow: x=%6.3f, y=%6.3f\\n\",\\\n",
-        "         double(lastMainLoopInputs.opticalFlowSensor.value_x),\\\n",
-        "         double(lastMainLoopInputs.opticalFlowSensor.value_y));\n",
-        "  printf(\"estHeight = %6.3fm\\n\",\\\n",
-        "         double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[1]));\n",
-        "  printf(\"heightSensor_value = %6.3fm\\n\",\\\n",
-        "         double(lastMainLoopInputs.heightSensor.value));\n",
-        "  printf(\"height sensor updated = %6.3fm\\n\",\\\n",
-        "         double(lastMainLoopInputs.heightSensor.updated));\n",
-        "  printf(\"current time = %6.3fm\\n\",\\\n",
-        "         double(lastMainLoopInputs.currentTime));\n",
-        "}\n"
-      ],
-      "metadata": {
-        "id": "g2X_jvSwyRs8"
-      },
-      "execution_count": null,
-      "outputs": []
     }
-  ]
+
+    // PID controller for drift compensation
+    float errorX = -estVelocity_1; // Desired velocity is 0
+    float errorY = -estVelocity_2; // Desired velocity is 0
+
+    integralErrorX += errorX * dt;
+    integralErrorY += errorY * dt;
+
+    float derivativeErrorX = (errorX - previousErrorX) / dt;
+    float derivativeErrorY = (errorY - previousErrorY) / dt;
+
+    previousErrorX = errorX;
+    previousErrorY = errorY;
+
+    float correctionX = kp * errorX + ki * integralErrorX + kd * derivativeErrorX;
+    float correctionY = kp * errorY + ki * integralErrorY + kd * derivativeErrorY;
+
+    // Adjust desired roll and pitch angles based on drift correction
+    float desRoll = correctionY / gravity;
+    float desPitch = -correctionX / gravity;
+    float desYaw = 0.0f; // Maintain stable yaw
+
+    // Height control
+    float desHeight = 0.5f;
+    float desAcc3 = -2 * dampingRatio_height * natFreq_height * estVelocity_3 -
+                    natFreq_height * natFreq_height * (estHeight - desHeight);
+    float desNormalizedAcceleration = (gravity + desAcc3) / (cosf(estRoll) * cosf(estPitch));
+
+    // Control motor commands
+    c_t = desNormalizedAcceleration * mass;
+    cmd_ang_vel.x = -(1 / timeConstant_rollAngle) * (estRoll - desRoll);
+    cmd_ang_vel.y = -(1 / timeConstant_pitchAngle) * (estPitch - desPitch);
+    cmd_ang_vel.z = -(1 / timeConstant_yawAngle) * (estYaw - desYaw);
+
+    cmd_ang_acc.x = -(1 / timeConstant_rollRate) * (rateGyro_corr.x - cmd_ang_vel.x);
+    cmd_ang_acc.y = -(1 / timeConstant_pitchRate) * (rateGyro_corr.y - cmd_ang_vel.y);
+    cmd_ang_acc.z = -(1 / timeConstant_yawRate) * (rateGyro_corr.z - cmd_ang_vel.z);
+
+    // Compute forces
+    n1 = inertia_xx * cmd_ang_acc.x;
+    n2 = inertia_yy * cmd_ang_acc.y;
+    n3 = inertia_zz * cmd_ang_acc.z;
+
+    cp1 = (1.0f / 4.0f) * (c_t + n1 / l_b - n2 / l_b + n3 / k_b);
+    cp2 = (1.0f / 4.0f) * (c_t - n1 / l_b - n2 / l_b - n3 / k_b);
+    cp3 = (1.0f / 4.0f) * (c_t - n1 / l_b + n2 / l_b + n3 / k_b);
+    cp4 = (1.0f / 4.0f) * (c_t + n1 / l_b + n2 / l_b - n3 / k_b);
+
+    pwm1 = pwmCommandFromSpeed(speedFromForce(cp1));
+    pwm2 = pwmCommandFromSpeed(speedFromForce(cp2));
+    pwm3 = pwmCommandFromSpeed(speedFromForce(cp3));
+    pwm4 = pwmCommandFromSpeed(speedFromForce(cp4));
+
+    outVals.motorCommand1 = pwm1;
+    outVals.motorCommand2 = pwm2;
+    outVals.motorCommand3 = pwm3;
+    outVals.motorCommand4 = pwm4;
+
+  return outVals;
+}
+
+
+void PrintStatus() {//accelerometer
+  //checking
+  printf("Debugs: %6.3f,%6.3f,%6.3f,%6.3f,%6.3f\n", double(mdebug1), double(mdebug2), double(mdebug3), double(mdebug4), double(mdebug5));
+
+  printf("Checking ");
+  //printf("total thrust =%6.3f, ", float (lastMainLoopOutputs.desNormalizedAcceleration));
+  printf("cp1 =%6.3f, ", double (cp1));
+  printf("ct =%6.3f, ", double (c_t));
+  printf("\n"); //new line
+
+  printf("Last range = %6.3fm,",\
+         double(lastMainLoopInputs.heightSensor.value));
+  printf("Last flow: x=%6.3f, y=%6.3f\n",\
+         double(lastMainLoopInputs.opticalFlowSensor.value_x),\
+         double(lastMainLoopInputs.opticalFlowSensor.value_y));
+  printf("estHeight = %6.3fm\n",\
+         double(lastMainLoopOutputs.telemetryOutputs_plusMinus100[1]));
+  printf("heightSensor_value = %6.3fm\n",\
+         double(lastMainLoopInputs.heightSensor.value));
+  printf("height sensor updated = %6.3fm\n",\
+         double(lastMainLoopInputs.heightSensor.updated));
+  printf("current time = %6.3fm\n",\
+         double(lastMainLoopInputs.currentTime));
 }
